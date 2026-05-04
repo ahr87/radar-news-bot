@@ -1,1 +1,154 @@
+import feedparser
+import json
+import os
+import random
+from datetime import datetime
 
+SEEN_FILE = "seen_stories.json"
+
+RSS_FEEDS = [
+    {
+        "name": "Reuters Oddly Enough",
+        "url": "https://feeds.reuters.com/reuters/oddlyEnoughNews",
+    },
+    {
+        "name": "BBC News - World",
+        "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
+    },
+    {
+        "name": "Mental Floss",
+        "url": "https://www.mentalfloss.com/rss",
+    },
+    {
+        "name": "Atlas Obscura",
+        "url": "https://www.atlasobscura.com/feeds/latest",
+    },
+    {
+        "name": "Science Daily - Strange & Offbeat",
+        "url": "https://www.sciencedaily.com/rss/strange_offbeat.xml",
+    },
+    {
+        "name": "The Guardian - Weird News",
+        "url": "https://www.theguardian.com/news/series/newsblog/rss",
+    },
+    {
+        "name": "New Scientist",
+        "url": "https://www.newscientist.com/feed/home/",
+    },
+]
+
+
+def load_seen_stories():
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_seen_story(story_id):
+    seen = load_seen_stories()
+    seen.add(story_id)
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(seen), f, ensure_ascii=False, indent=2)
+
+
+def fetch_stories_from_feed(feed_info):
+    print(f"  Fetching: {feed_info['name']} ...")
+    try:
+        feed = feedparser.parse(feed_info["url"])
+        stories = []
+        for entry in feed.entries:
+            title = entry.get("title", "").strip()
+            link = entry.get("link", "").strip()
+            summary = entry.get("summary", entry.get("description", "")).strip()
+
+            if not title or not link:
+                continue
+
+            story = {
+                "id": link,
+                "title": title,
+                "link": link,
+                "summary": summary,
+                "source": feed_info["name"],
+                "published": entry.get("published", ""),
+            }
+            stories.append(story)
+
+        print(f"    Found {len(stories)} stories.")
+        return stories
+    except Exception as e:
+        print(f"    ERROR fetching {feed_info['name']}: {e}")
+        return []
+
+
+def fetch_all_stories():
+    all_stories = []
+    for feed_info in RSS_FEEDS:
+        stories = fetch_stories_from_feed(feed_info)
+        all_stories.extend(stories)
+    return all_stories
+
+
+def pick_story(all_stories, seen_ids):
+    unseen = [s for s in all_stories if s["id"] not in seen_ids]
+
+    if not unseen:
+        print("\nNo new unseen stories available. Resetting seen history...")
+        unseen = all_stories
+
+    if not unseen:
+        print("No stories found at all. Check your internet connection or feed URLs.")
+        return None
+
+    chosen = random.choice(unseen)
+    return chosen
+
+
+def clean_html(text):
+    import re
+    clean = re.sub(r"<[^>]+>", "", text)
+    clean = clean.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
+    return clean.strip()
+
+
+def main():
+    print("=" * 60)
+    print("  Instagram Bot - News Scraper")
+    print(f"  Run at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+
+    print("\n[Step 1] Loading seen stories history...")
+    seen_ids = load_seen_stories()
+    print(f"  Previously seen: {len(seen_ids)} stories.")
+
+    print("\n[Step 2] Fetching stories from RSS feeds...")
+    all_stories = fetch_all_stories()
+    print(f"\n  Total stories fetched: {len(all_stories)}")
+
+    print("\n[Step 3] Picking a new story...")
+    story = pick_story(all_stories, seen_ids)
+
+    if not story:
+        return
+
+    title = clean_html(story["title"])
+    summary = clean_html(story["summary"])
+    link = story["link"]
+    source = story["source"]
+
+    print("\n" + "=" * 60)
+    print("  SELECTED STORY")
+    print("=" * 60)
+    print(f"  Source  : {source}")
+    print(f"  Title   : {title}")
+    print(f"  Link    : {link}")
+    print(f"  Summary : {summary[:300]}{'...' if len(summary) > 300 else ''}")
+    print("=" * 60)
+
+    save_seen_story(story["id"])
+    print("\n[Done] Story saved to seen history. Next run will skip this story.")
+
+
+if __name__ == "__main__":
+    main()
