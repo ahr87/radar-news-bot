@@ -2,7 +2,9 @@ import feedparser
 import json
 import os
 import random
+import re
 from datetime import datetime
+from openai import OpenAI
 
 SEEN_FILE = "seen_stories.json"
 
@@ -106,15 +108,73 @@ def pick_story(all_stories, seen_ids):
 
 
 def clean_html(text):
-    import re
     clean = re.sub(r"<[^>]+>", "", text)
-    clean = clean.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " ")
+    clean = (
+        clean.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+    )
     return clean.strip()
+
+
+def generate_arabic_caption(story):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("OPENAI_API_KEY is not set in environment variables.")
+
+    client = OpenAI(api_key=api_key)
+
+    title = clean_html(story["title"])
+    summary = clean_html(story["summary"])
+    source = story["source"]
+
+    prompt = f"""أنت كاتب محتوى عربي محترف متخصص في إنشاء منشورات إنستغرام جذابة وفيروسية.
+
+لديك الخبر التالي باللغة الإنجليزية:
+العنوان: {title}
+الملخص: {summary}
+المصدر: {source}
+
+مهمتك:
+1. اكتب منشور إنستغرام بالعربية الفصحى المبسطة (يفهمها الجمهور العربي الواسع).
+2. ابدأ بجملة افتتاحية مثيرة للاهتمام أو سؤال يشد القارئ فوراً.
+3. لخص الخبر بأسلوب شيق وواضح في 3-5 جمل.
+4. اختم بجملة تحفّز التفاعل (مثل رأيك؟ أو شاركنا تجربتك).
+5. أضف في النهاية 10-15 هاشتاق عربي وإنجليزي مناسبة للخبر.
+
+المنشور يجب أن يكون:
+- جذاباً وفيروسياً
+- واضحاً وسهل القراءة
+- يثير الفضول والتفاعل
+- مناسب لجمهور عربي على إنستغرام
+
+اكتب المنشور مباشرة بدون أي مقدمة أو تعليق منك."""
+
+    print("\n[Step 4] Sending story to GPT-4o for Arabic caption generation...")
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "أنت كاتب محتوى عربي محترف ومتخصص في إنشاء محتوى فيروسي لمنصات التواصل الاجتماعي.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.85,
+        max_tokens=800,
+    )
+
+    caption = response.choices[0].message.content.strip()
+    return caption
 
 
 def main():
     print("=" * 60)
-    print("  Instagram Bot - News Scraper")
+    print("  Instagram Bot - News Scraper + Arabic Caption")
     print(f"  Run at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
@@ -134,20 +194,31 @@ def main():
 
     title = clean_html(story["title"])
     summary = clean_html(story["summary"])
-    link = story["link"]
-    source = story["source"]
 
     print("\n" + "=" * 60)
-    print("  SELECTED STORY")
+    print("  SELECTED STORY (English)")
     print("=" * 60)
-    print(f"  Source  : {source}")
+    print(f"  Source  : {story['source']}")
     print(f"  Title   : {title}")
-    print(f"  Link    : {link}")
+    print(f"  Link    : {story['link']}")
     print(f"  Summary : {summary[:300]}{'...' if len(summary) > 300 else ''}")
+    print("=" * 60)
+
+    arabic_caption = generate_arabic_caption(story)
+
+    print("\n" + "=" * 60)
+    print("  GENERATED ARABIC CAPTION")
+    print("=" * 60)
+    print(arabic_caption)
     print("=" * 60)
 
     save_seen_story(story["id"])
     print("\n[Done] Story saved to seen history. Next run will skip this story.")
+
+    return {
+        "story": story,
+        "arabic_caption": arabic_caption,
+    }
 
 
 if __name__ == "__main__":
