@@ -120,6 +120,89 @@ def clean_html(text):
     return clean.strip()
 
 
+def build_image_prompt(story, client):
+    title = clean_html(story["title"])
+    summary = clean_html(story["summary"])
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert at writing DALL-E 3 image prompts. "
+                    "Your prompts are vivid, visual, and always policy-safe. "
+                    "Never include violence, blood, real people, political figures, "
+                    "logos, or copyrighted elements. Focus on scene, atmosphere, and concept."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Write a single DALL-E 3 image prompt for an Instagram post about this news story.\n\n"
+                    f"Title: {title}\n"
+                    f"Summary: {summary[:500]}\n\n"
+                    f"Requirements:\n"
+                    f"- Photorealistic or high-quality digital art style\n"
+                    f"- Visually striking and suitable for Instagram\n"
+                    f"- Capture the core concept or mood of the story\n"
+                    f"- Square composition (1:1)\n"
+                    f"- No text, no logos, no real people\n"
+                    f"- Output the prompt only, no explanation"
+                ),
+            },
+        ],
+        temperature=0.7,
+        max_tokens=200,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def generate_image(story):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("OPENAI_API_KEY is not set in environment variables.")
+
+    client = OpenAI(api_key=api_key)
+
+    print("\n[Step 5] Building a policy-safe image prompt with GPT-4o...")
+    try:
+        image_prompt = build_image_prompt(story, client)
+        print(f"  Image prompt: {image_prompt[:200]}...")
+    except Exception as e:
+        print(f"  WARNING: Could not build image prompt: {e}")
+        return None
+
+    print("\n[Step 6] Generating image with DALL-E 3...")
+    try:
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=image_prompt,
+            size="1024x1024",
+            quality="hd",
+            n=1,
+        )
+        image_url = response.data[0].url
+        revised_prompt = response.data[0].revised_prompt
+        print(f"  Revised prompt: {revised_prompt[:200]}...")
+        return image_url
+
+    except Exception as e:
+        error_msg = str(e)
+        if "content_policy_violation" in error_msg or "safety system" in error_msg.lower():
+            print(
+                f"\n  ⚠️  WARNING: DALL-E 3 refused this image due to content policy.\n"
+                f"  Reason: {error_msg[:200]}\n"
+                f"  The script will continue without an image.\n"
+                f"  Consider using a generic fallback image for this post."
+            )
+        else:
+            print(f"\n  ⚠️  WARNING: Image generation failed: {error_msg[:200]}\n"
+                  f"  The script will continue without an image.")
+        return None
+
+
 def generate_arabic_caption(story):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -174,7 +257,7 @@ def generate_arabic_caption(story):
 
 def main():
     print("=" * 60)
-    print("  Instagram Bot - News Scraper + Arabic Caption")
+    print("  Instagram Bot - News Scraper + Arabic Caption + Image")
     print(f"  Run at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
@@ -212,12 +295,25 @@ def main():
     print(arabic_caption)
     print("=" * 60)
 
+    image_url = generate_image(story)
+
+    print("\n" + "=" * 60)
+    print("  GENERATED IMAGE")
+    print("=" * 60)
+    if image_url:
+        print(f"  ✅ Image URL (click to open):")
+        print(f"  {image_url}")
+    else:
+        print("  ❌ No image generated (see warning above).")
+    print("=" * 60)
+
     save_seen_story(story["id"])
     print("\n[Done] Story saved to seen history. Next run will skip this story.")
 
     return {
         "story": story,
         "arabic_caption": arabic_caption,
+        "image_url": image_url,
     }
 
 
