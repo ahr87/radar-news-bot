@@ -125,6 +125,31 @@ RSS_FEEDS = [
         "name": "IGN",
         "url": "https://feeds.ign.com/ign/all",
     },
+    # مصادر إضافية للتسريبات والأخبار الحصرية (محتوى مفاجئ عادة يحقق تفاعل أعلى)
+    {
+        "name": "MacRumors",
+        "url": "https://www.macrumors.com/macrumors.xml",
+    },
+    {
+        "name": "9to5Google",
+        "url": "https://9to5google.com/feed/",
+    },
+    {
+        "name": "9to5Mac",
+        "url": "https://9to5mac.com/feed/",
+    },
+    {
+        "name": "Tom's Hardware",
+        "url": "https://www.tomshardware.com/feeds/all",
+    },
+    {
+        "name": "XDA Developers",
+        "url": "https://www.xda-developers.com/feed/",
+    },
+    {
+        "name": "Hacker News",
+        "url": "https://hnrss.org/frontpage",
+    },
 ]
 
 # هوية بصرية ثابتة تُضاف لكل صورة غلاف: يجب أن تكون الصورة مرتبطة مباشرة بموضوع الخبر (أجهزة/تقنيات ملموسة)
@@ -654,11 +679,22 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
 
-    # جدولة النشر (التوقيت بـ UTC - سيرفر ريبليت)
-    # 11:00 UTC = 2:00 PM توقيت محلي
-    # 17:00 UTC = 8:00 PM توقيت محلي
-    schedule.every().day.at("11:00").do(job)
-    schedule.every().day.at("17:00").do(job)
+    # جدولة النشر: 10 منشورات يومياً موزّعة على أوقات الذروة بالتوقيت المحلي العراقي (UTC+3)
+    # كثافة أعلى بالفترة المسائية والليلية (الأعلى تفاعلاً عادة لجمهورنا)، مع حضور صباحي وظهري خفيف.
+    PEAK_TIMES_UTC = [
+        "06:00",  # 09:00 صباحاً محلي
+        "08:00",  # 11:00 صباحاً محلي
+        "10:00",  # 01:00 ظهراً محلي
+        "12:00",  # 03:00 عصراً محلي
+        "13:30",  # 04:30 عصراً محلي
+        "15:00",  # 06:00 مساءً محلي
+        "16:30",  # 07:30 مساءً محلي
+        "18:00",  # 09:00 مساءً محلي (ذروة)
+        "19:30",  # 10:30 مساءً محلي (ذروة)
+        "21:00",  # 12:00 منتصف الليل محلي (ذروة سهر)
+    ]
+    for t in PEAK_TIMES_UTC:
+        schedule.every().day.at(t).do(job)
 
     print("Automation running in the background... publishing at the scheduled times.")
     print("Keep-alive server is running; you can now link it with UptimeRobot.")
