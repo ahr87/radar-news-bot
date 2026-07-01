@@ -5,6 +5,7 @@ import time
 import math
 import random
 import base64
+from io import BytesIO
 from threading import Thread
 
 import arabic_reshaper
@@ -15,6 +16,8 @@ from bidi.algorithm import get_display
 from flask import Flask
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+
+from assets.fonts.font_data import NOTO_KUFI_ARABIC_BOLD_B64, LIBERATION_SANS_BOLD_B64
 
 # --- المفاتيح من بيئة ريبليت ---
 ACCESS_TOKEN = os.environ.get('IG_ACCESS_TOKEN')
@@ -30,9 +33,20 @@ IMAGE_HEIGHT = 1350  # نسبة 4:5 (الأنسب لمنشورات فيد انس
 # قالب العلامة التجارية الثابت
 BRAND_HANDLE = "RADAR.NEWS"
 BRAND_ACCENT_COLOR = (86, 210, 255)  # سماوي نيون، يُستخدم لتمييز الجزء الأهم من العنوان
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
-HEADLINE_FONT_PATH = os.path.join(ASSETS_DIR, "NotoKufiArabic-Bold.ttf")
-LATIN_FONT_PATH = os.path.join(ASSETS_DIR, "LiberationSans-Bold.ttf")
+
+# الخطوط مضمّنة كنص Base64 داخل الكود (assets/fonts/font_data.py) بدل ملفات ثنائية منفصلة،
+# عشان يستحيل تتلف بأي تحويل نصي/نهايات أسطر أثناء نقل الملفات عبر Git
+NOTO_KUFI_ARABIC_BOLD_BYTES = base64.b64decode(NOTO_KUFI_ARABIC_BOLD_B64)
+LIBERATION_SANS_BOLD_BYTES = base64.b64decode(LIBERATION_SANS_BOLD_B64)
+
+
+def _load_headline_font(size, layout_engine=None):
+    kwargs = {"layout_engine": layout_engine} if layout_engine is not None else {}
+    return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size, **kwargs)
+
+
+def _load_latin_font(size):
+    return ImageFont.truetype(BytesIO(LIBERATION_SANS_BOLD_BYTES), size)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
@@ -108,33 +122,25 @@ def _shape_arabic_fallback(text):
     return get_display(arabic_reshaper.reshape(text))
 
 
-def _basic_layout_font(font):
-    """يعيد تحميل نفس الخط بمحرك تخطيط أساسي، لمنع raqm (إن وُجد) من إعادة تشكيل نص مُشكَّل مسبقاً."""
-    try:
-        return ImageFont.truetype(font.path, font.size, layout_engine=ImageFont.Layout.BASIC)
-    except Exception:
-        return font
-
-
 _ARABIC_FONT_HEALTHY = None
 
 
-def _arabic_font_healthy(font_path):
-    """يتحقق فعلياً (لا يفترض فقط) أن الخط يرسم حرفاً عربياً حقيقياً، لأن raqm أحياناً يفشل بصمت بدون استثناء."""
+def _arabic_font_healthy():
+    """يتحقق فعلياً (لا يفترض فقط) أن الخط المضمّن يرسم حرفاً عربياً حقيقياً، لأن raqm أحياناً يفشل بصمت بدون استثناء."""
     global _ARABIC_FONT_HEALTHY
     if _ARABIC_FONT_HEALTHY is not None:
         return _ARABIC_FONT_HEALTHY
     try:
-        test_font = ImageFont.truetype(font_path, 60, layout_engine=ImageFont.Layout.BASIC)
+        test_font = _load_headline_font(60, layout_engine=ImageFont.Layout.BASIC)
         test_img = Image.new("L", (120, 80), 0)
         test_draw = ImageDraw.Draw(test_img)
         test_draw.text((10, 10), _shape_arabic_fallback("الف"), font=test_font, fill=255)
         _ARABIC_FONT_HEALTHY = test_img.getbbox() is not None
         if not _ARABIC_FONT_HEALTHY:
-            print(f"ERROR: Arabic font at {font_path} produced no visible glyphs (likely a corrupted/unreadable font file).")
+            print("ERROR: embedded Arabic font produced no visible glyphs (unexpected - please report this).")
     except Exception as e:
         _ARABIC_FONT_HEALTHY = False
-        print(f"ERROR: could not load Arabic font at {font_path}: {str(e)[:200]}")
+        print(f"ERROR: could not load embedded Arabic font: {str(e)[:200]}")
     return _ARABIC_FONT_HEALTHY
 
 
@@ -148,15 +154,15 @@ def _raqm_renders_correctly(draw, font):
 
 
 def _arabic_textbbox(draw, text, font):
-    if not _arabic_font_healthy(getattr(font, "path", HEADLINE_FONT_PATH)):
+    if not _arabic_font_healthy():
         return draw.textbbox((0, 0), text, font=font)
     if _raqm_renders_correctly(draw, font):
         return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
-    return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_basic_layout_font(font))
+    return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_load_headline_font(font.size, layout_engine=ImageFont.Layout.BASIC))
 
 
 def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", stroke_width=0, stroke_fill=None):
-    if not _arabic_font_healthy(getattr(font, "path", HEADLINE_FONT_PATH)):
+    if not _arabic_font_healthy():
         draw.text(xy, text, font=font, fill=fill, anchor=anchor, align=align,
                    stroke_width=stroke_width, stroke_fill=stroke_fill)
         return
@@ -164,7 +170,8 @@ def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", s
         draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align,
                    stroke_width=stroke_width, stroke_fill=stroke_fill)
     else:
-        draw.text(xy, _shape_arabic_fallback(text), font=_basic_layout_font(font), fill=fill, anchor=anchor,
+        basic_font = _load_headline_font(font.size, layout_engine=ImageFont.Layout.BASIC)
+        draw.text(xy, _shape_arabic_fallback(text), font=basic_font, fill=fill, anchor=anchor,
                    align=align, stroke_width=stroke_width, stroke_fill=stroke_fill)
 
 
@@ -471,7 +478,7 @@ def apply_brand_template(image_path, headline, highlight):
 
         # العنوان الكبير أسفل الصورة، مع تمييز لوني لأهم جزء فيه
         headline_text = _sanitize_headline(headline)
-        headline_font = ImageFont.truetype(HEADLINE_FONT_PATH, max(40, width // 15))
+        headline_font = _load_headline_font(max(40, width // 15))
         max_text_width = int(width * 0.88)
         lines = _wrap_arabic_text(draw, headline_text, headline_font, max_text_width)
 
@@ -485,7 +492,7 @@ def apply_brand_template(image_path, headline, highlight):
             y_cursor += line_height
 
         # مقبض العلامة التجارية أسفل اللوحة تماماً (خط لاتيني مخصص، لضمان عرض سليم لاسم العلامة الإنكليزي)
-        handle_font = ImageFont.truetype(LATIN_FONT_PATH, max(18, width // 38))
+        handle_font = _load_latin_font(max(18, width // 38))
         handle_text = f">> {BRAND_HANDLE}"
         draw.text((width // 2, height - 42), handle_text, font=handle_font,
                    fill=BRAND_ACCENT_COLOR + (255,), anchor="mm")
