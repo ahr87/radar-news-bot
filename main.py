@@ -8,9 +8,11 @@ import shutil
 import subprocess
 from threading import Thread
 
+import arabic_reshaper
 import feedparser
 import requests
 import schedule
+from bidi.algorithm import get_display
 from flask import Flask
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
@@ -109,6 +111,25 @@ def save_seen_story(story_id):
         json.dump(list(seen), f, ensure_ascii=False, indent=2)
 
 
+def _shape_arabic_fallback(text):
+    """يشكّل النص العربي يدوياً (بدون الحاجة لمكتبة raqm) لضمان عمله بأي بيئة."""
+    return get_display(arabic_reshaper.reshape(text))
+
+
+def _arabic_textbbox(draw, text, font):
+    try:
+        return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+    except Exception:
+        return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=font)
+
+
+def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center"):
+    try:
+        draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align)
+    except Exception:
+        draw.text(xy, _shape_arabic_fallback(text), font=font, fill=fill, anchor=anchor, align=align)
+
+
 def clean_html(text):
     clean = re.sub(r"<[^>]+>", "", text)
     clean = (
@@ -124,7 +145,7 @@ def clean_html(text):
 
 # --- جلب الأخبار من مصادر RSS واختيار قصة جديدة ---
 def fetch_stories_from_feed(feed_info):
-    print(f"  جلب: {feed_info['name']} ...")
+    print(f"  Fetching: {feed_info['name']} ...")
     try:
         feed = feedparser.parse(feed_info["url"])
         stories = []
@@ -145,10 +166,10 @@ def fetch_stories_from_feed(feed_info):
                 "published": entry.get("published", ""),
             })
 
-        print(f"    تم العثور على {len(stories)} خبر.")
+        print(f"    Found {len(stories)} stories.")
         return stories
     except Exception as e:
-        print(f"    ❌ خطأ في جلب {feed_info['name']}: {e}")
+        print(f"    ERROR fetching {feed_info['name']}: {e}")
         return []
 
 
@@ -163,11 +184,11 @@ def pick_story(all_stories, seen_ids):
     unseen = [s for s in all_stories if s["id"] not in seen_ids]
 
     if not unseen:
-        print("  لا توجد قصص جديدة غير منشورة، سيتم إعادة تدوير القصص القديمة...")
+        print("  No new unseen stories, recycling older stories...")
         unseen = all_stories
 
     if not unseen:
-        print("  ❌ لم يتم العثور على أي قصص إطلاقاً.")
+        print("  ERROR: no stories found at all.")
         return None
 
     return random.choice(unseen)
@@ -182,7 +203,7 @@ def _extract_field(full_text, field_name):
 
 
 def generate_arabic_content(story):
-    print("🧠 جاري كتابة السيناريو العربي بالاعتماد على الخبر...")
+    print("Writing Arabic script based on the story...")
     title = clean_html(story["title"])
     summary = clean_html(story["summary"])
     source = story["source"]
@@ -235,10 +256,10 @@ def generate_arabic_content(story):
             f"{hashtags} #رادار_نيوز #RadarNews"
         )
 
-        print(f"✅ تم كتابة السيناريو: {topic_summary}")
+        print(f"Script written: {topic_summary}")
         return topic_summary, voice_script, caption
     except Exception as e:
-        print(f"❌ خطأ في توليد المحتوى: {e}")
+        print(f"ERROR generating content: {e}")
         return None, None, None
 
 
@@ -349,18 +370,18 @@ def apply_brand_template(image_path):
 
         img.convert("RGB").save(image_path, "JPEG", quality=95)
     except Exception as e:
-        print(f"⚠️ تعذر تطبيق قالب العلامة على الصورة (سيتم المتابعة بدونه): {str(e)[:200]}")
+        print(f"WARNING: could not apply brand template to image (continuing without it): {str(e)[:200]}")
 
 
 def generate_cover_image(story, topic_summary):
-    print("🎨 جاري بناء برومبت آمن للصورة...")
+    print("Building a safe image prompt...")
     try:
         image_prompt = build_image_prompt(story, topic_summary)
     except Exception as e:
-        print(f"❌ تعذر بناء برومبت الصورة: {e}")
+        print(f"ERROR building image prompt: {e}")
         return False
 
-    print("🎨 جاري رسم اللوحة السريالية (dall-e-3)...")
+    print("Generating cover image (dall-e-3)...")
     try:
         image_response = client.images.generate(
             model="dall-e-3",
@@ -374,9 +395,9 @@ def generate_cover_image(story, topic_summary):
     except Exception as e:
         error_msg = str(e)
         if "content_policy_violation" in error_msg or "safety system" in error_msg.lower():
-            print(f"⚠️ رفض DALL-E توليد هذه الصورة بسبب سياسة المحتوى: {error_msg[:200]}")
+            print(f"WARNING: DALL-E refused this image due to content policy: {error_msg[:200]}")
             return False
-        print(f"⚠️ تعذر استخدام dall-e-3 ({error_msg[:150]})، جاري المحاولة عبر gpt-image-1...")
+        print(f"WARNING: dall-e-3 unavailable ({error_msg[:150]}), trying gpt-image-1...")
 
     try:
         image_response = client.images.generate(
@@ -391,9 +412,9 @@ def generate_cover_image(story, topic_summary):
     except Exception as e:
         error_msg = str(e)
         if "content_policy_violation" in error_msg or "safety system" in error_msg.lower():
-            print(f"⚠️ رفض gpt-image-1 توليد هذه الصورة بسبب سياسة المحتوى: {error_msg[:200]}")
+            print(f"WARNING: gpt-image-1 refused this image due to content policy: {error_msg[:200]}")
         else:
-            print(f"❌ خطأ في توليد الصورة عبر gpt-image-1: {error_msg[:200]}")
+            print(f"ERROR generating image via gpt-image-1: {error_msg[:200]}")
         return False
 
 
@@ -422,21 +443,21 @@ def _generate_voice_elevenlabs(text):
             with open(TEMP_AUDIO, "wb") as f:
                 f.write(response.content)
             return True
-        print(f"⚠️ فشل ElevenLabs (HTTP {response.status_code}): {response.text[:200]}")
+        print(f"WARNING: ElevenLabs failed (HTTP {response.status_code}): {response.text[:200]}")
         return False
     except Exception as e:
-        print(f"⚠️ خطأ في الاتصال بـ ElevenLabs: {str(e)[:200]}")
+        print(f"WARNING: error connecting to ElevenLabs: {str(e)[:200]}")
         return False
 
 
 def generate_voice_over(text):
     if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
-        print("🎙️ جاري تسجيل صوت واقعي عبر ElevenLabs...")
+        print("Generating realistic voice via ElevenLabs...")
         if _generate_voice_elevenlabs(text):
             return True
-        print("⚠️ سيتم التراجع لصوت OpenAI...")
+        print("WARNING: falling back to OpenAI voice...")
 
-    print("🎙️ جاري تسجيل صوت راوٍ طبيعي بالفصحى (OpenAI)...")
+    print("Generating narrator voice (OpenAI)...")
     try:
         response = client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -452,7 +473,7 @@ def generate_voice_over(text):
             f.write(response.content)
         return True
     except Exception as e:
-        print(f"⚠️ تعذر استخدام gpt-4o-mini-tts ({str(e)[:150]})، جاري المحاولة عبر tts-1-hd...")
+        print(f"WARNING: gpt-4o-mini-tts unavailable ({str(e)[:150]}), trying tts-1-hd...")
 
     try:
         response = client.audio.speech.create(
@@ -464,7 +485,7 @@ def generate_voice_over(text):
             f.write(response.content)
         return True
     except Exception as e:
-        print(f"❌ خطأ في توليد الصوت: {str(e)[:200]}")
+        print(f"ERROR generating voice: {str(e)[:200]}")
         return False
 
 
@@ -497,7 +518,7 @@ def _render_caption_image(text):
     draw = ImageDraw.Draw(img)
     font = ImageFont.truetype(CAPTION_FONT_PATH, 62)
 
-    bbox = draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+    bbox = _arabic_textbbox(draw, text, font)
     text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     pad_x, pad_y = 40, 24
     box_w = min(VIDEO_WIDTH - 60, text_w + pad_x * 2)
@@ -506,13 +527,12 @@ def _render_caption_image(text):
     box_y1 = box_y0 + text_h + pad_y * 2
 
     draw.rounded_rectangle([box_x0, box_y0, box_x0 + box_w, box_y1], radius=20, fill=(0, 0, 0, 165))
-    draw.text(
+    _draw_arabic_text(
+        draw,
         (VIDEO_WIDTH // 2, (box_y0 + box_y1) // 2),
         text,
         font=font,
         fill=(255, 255, 255, 255),
-        direction="rtl",
-        language="ar",
         anchor="mm",
         align="center",
     )
@@ -524,7 +544,7 @@ def _burn_captions(base_video_path):
     try:
         words = _transcribe_word_timestamps()
         if not words:
-            print("⚠️ لم يتم استخراج توقيت للكلمات، سيُنشر الفيديو بدون ترجمة.")
+            print("WARNING: could not extract word timing, publishing without captions.")
             return False
 
         chunks = _group_words_into_chunks(words, words_per_chunk=3)
@@ -567,14 +587,14 @@ def _burn_captions(base_video_path):
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
     except Exception as e:
-        print(f"⚠️ تعذر حرق الترجمة بالفيديو (سيُنشر بدونها): {str(e)[:200]}")
+        print(f"WARNING: could not burn captions into video (publishing without them): {str(e)[:200]}")
         return False
     finally:
         shutil.rmtree(CAPTION_DIR, ignore_errors=True)
 
 
 def create_video_reel():
-    print("🎬 جاري المونتاج وإضافة الحركة البصرية...")
+    print("Assembling video and motion effect...")
     try:
         command = [
             "ffmpeg", "-y", "-loop", "1", "-framerate", "30", "-i", TEMP_IMAGE, "-i", TEMP_AUDIO,
@@ -584,10 +604,10 @@ def create_video_reel():
         ]
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except Exception as e:
-        print(f"❌ خطأ في المونتاج: {e}")
+        print(f"ERROR assembling video: {e}")
         return False
 
-    print("💬 جاري إضافة ترجمة عربية متزامنة مع الصوت...")
+    print("Adding synced Arabic captions...")
     if not _burn_captions(TEMP_BASE_VIDEO):
         os.replace(TEMP_BASE_VIDEO, TEMP_VIDEO)
         return True
@@ -598,18 +618,18 @@ def create_video_reel():
 
 
 def upload_to_temp_server():
-    print("🌐 جاري الرفع للسيرفر المؤقت (tmpfiles.org)...")
+    print("Uploading to temporary host (tmpfiles.org)...")
     try:
         with open(TEMP_VIDEO, "rb") as f:
             res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f}).json()
         return res['data']['url'].replace("tmpfiles.org/", "tmpfiles.org/dl/")
     except Exception as e:
-        print(f"❌ خطأ في الرفع: {e}")
+        print(f"ERROR uploading video: {e}")
         return None
 
 
 def post_reel_to_instagram(video_url, caption):
-    print("🚀 جاري إرسال الريلز لميتا ومعالجته...")
+    print("Sending Reel to Meta for processing...")
     url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media"
 
     params = {'video_url': video_url, 'caption': caption, 'media_type': 'REELS', 'access_token': ACCESS_TOKEN}
@@ -628,12 +648,12 @@ def post_reel_to_instagram(video_url, caption):
                 break
 
         if is_ready:
-            print("🚀 جاري النشر للإكسبلور...")
+            print("Publishing to Explore...")
             publish_url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
             publish_res = requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
 
             if 'id' in publish_res:
-                print("🎉 تم النشر بنجاح!")
+                print("SUCCESS: published!")
                 return True
     return False
 
@@ -647,45 +667,45 @@ def cleanup_temp_files():
 
 def job():
     """دورة الإنتاج الآلية: جلب خبر حقيقي -> محتوى عربي -> صورة -> صوت -> فيديو -> نشر"""
-    print("⏳ حان وقت النشر المجدول! بدء دورة الإنتاج...")
+    print("Scheduled run starting: beginning production cycle...")
 
     seen_ids = load_seen_stories()
 
-    print("📡 جاري جلب الأخبار من مصادر RSS...")
+    print("Fetching news from RSS sources...")
     all_stories = fetch_all_stories()
     if not all_stories:
-        print("❌ لم يتم العثور على أي أخبار. إلغاء الدورة.")
+        print("ERROR: no stories found. Cancelling cycle.")
         return
 
     story = pick_story(all_stories, seen_ids)
     if not story:
-        print("❌ لا توجد قصة صالحة للنشر. إلغاء الدورة.")
+        print("ERROR: no valid story to publish. Cancelling cycle.")
         return
 
-    print(f"📰 القصة المختارة: {story['title']} ({story['source']})")
+    print(f"Selected story: {story['title']} ({story['source']})")
 
     topic_summary, voice_script, caption = generate_arabic_content(story)
     if not (topic_summary and voice_script and caption):
-        print("❌ فشل توليد المحتوى العربي. إلغاء الدورة.")
+        print("ERROR: failed to generate Arabic content. Cancelling cycle.")
         return
 
     if not generate_cover_image(story, topic_summary):
-        print("❌ فشل توليد الصورة. إلغاء الدورة.")
+        print("ERROR: failed to generate image. Cancelling cycle.")
         return
 
     if not generate_voice_over(voice_script):
-        print("❌ فشل توليد الصوت. إلغاء الدورة.")
+        print("ERROR: failed to generate voice. Cancelling cycle.")
         cleanup_temp_files()
         return
 
     if not create_video_reel():
-        print("❌ فشل تركيب الفيديو. إلغاء الدورة.")
+        print("ERROR: failed to assemble video. Cancelling cycle.")
         cleanup_temp_files()
         return
 
     public_video_url = upload_to_temp_server()
     if not public_video_url:
-        print("❌ فشل الرفع للسيرفر المؤقت. إلغاء الدورة.")
+        print("ERROR: failed to upload to temp host. Cancelling cycle.")
         cleanup_temp_files()
         return
 
@@ -708,8 +728,8 @@ if __name__ == "__main__":
     schedule.every().day.at("11:00").do(job)
     schedule.every().day.at("17:00").do(job)
 
-    print("✅ النظام الآلي يعمل الآن في الخلفية... سيتم النشر في الأوقات المحددة.")
-    print("🌐 سيرفر النبض يعمل، يمكنك الآن ربطه بـ UptimeRobot.")
+    print("Automation running in the background... publishing at the scheduled times.")
+    print("Keep-alive server is running; you can now link it with UptimeRobot.")
 
     # حلقة لانهائية لتبقي السكربت يراقب الوقت
     while True:
