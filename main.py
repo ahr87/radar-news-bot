@@ -28,18 +28,6 @@ app = Flask(__name__)
 
 RSS_FEEDS = [
     {
-        "name": "Reuters Oddly Enough",
-        "url": "https://feeds.reuters.com/reuters/oddlyEnoughNews",
-    },
-    {
-        "name": "BBC News - World",
-        "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
-    },
-    {
-        "name": "Mental Floss",
-        "url": "https://www.mentalfloss.com/rss",
-    },
-    {
         "name": "Atlas Obscura",
         "url": "https://www.atlasobscura.com/feeds/latest",
     },
@@ -48,14 +36,33 @@ RSS_FEEDS = [
         "url": "https://www.sciencedaily.com/rss/strange_offbeat.xml",
     },
     {
-        "name": "The Guardian - Weird News",
-        "url": "https://www.theguardian.com/news/series/newsblog/rss",
-    },
-    {
         "name": "New Scientist",
         "url": "https://www.newscientist.com/feed/home/",
     },
+    {
+        "name": "IFLScience",
+        "url": "https://www.iflscience.com/rss",
+    },
+    {
+        "name": "Live Science",
+        "url": "https://www.livescience.com/feeds/all",
+    },
+    {
+        "name": "Smithsonian Magazine - Smart News",
+        "url": "https://www.smithsonianmag.com/rss/smart-news/",
+    },
+    {
+        "name": "Ancient Origins",
+        "url": "https://www.ancient-origins.net/rss.xml",
+    },
 ]
+
+# هوية بصرية ثابتة تُضاف لكل صورة غلاف، عشان يكون فيه "تيمبلت" مرئي موحّد يميّز صفحة "رادار نيوز"
+BRAND_VISUAL_STYLE = (
+    "signature visual identity: deep midnight-blue and gold color palette, "
+    "dramatic cinematic rim lighting, dreamlike surreal digital-art style, "
+    "consistent with a mystery/curiosity documentary brand"
+)
 
 
 @app.route('/')
@@ -148,6 +155,13 @@ def pick_story(all_stories, seen_ids):
 
 
 # --- توليد المحتوى العربي (كابشن + سيناريو صوتي) بالاعتماد على خبر حقيقي ---
+def _extract_field(full_text, field_name):
+    for line in full_text.split('\n'):
+        if line.strip().startswith(field_name):
+            return line.split(":", 1)[1].strip() if ":" in line else ""
+    return ""
+
+
 def generate_arabic_content(story):
     print("🧠 جاري كتابة السيناريو العربي بالاعتماد على الخبر...")
     title = clean_html(story["title"])
@@ -155,41 +169,52 @@ def generate_arabic_content(story):
     source = story["source"]
 
     text_prompt = f"""
-    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بتحويل الأخبار العالمية الغريبة والمثيرة إلى ريلز عربية جذابة.
+    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بصناعة ريلز عربية فضولية شديدة الجذب مبنية على أخبار حقيقية، بهدف الوصول لصفحة الاكتشاف (الإكسبلور).
 
-    هذا خبر حقيقي من مصدر موثوق، اعتمد عليه فقط ولا تخترع معلومات غير موجودة فيه:
+    هذا خبر حقيقي من مصدر موثوق:
     العنوان: {title}
     الملخص: {summary}
     المصدر: {source}
 
-    اكتب المحتوى بالعربية الفصحى المبسطة والسليمة 100% (لتجنب أخطاء نطق الراوي الآلي).
+    القواعد المهمة:
+    1. اعتمد فقط على المعلومات الموجودة فعلاً بالخبر أعلاه، ولا تخترع أي حقيقة غير موجودة فيه.
+    2. لا تُعِد صياغة العنوان الرئيسي المعروف للخبر. ابحث داخل الملخص عن أغرب وأندر تفصيل موجود فيه (رقم صادم، سبب غير متوقع، تفصيل جانبي قليل من ينتبه له)، واجعله محور المحتوى بدل الفكرة العامة المتوقعة.
+    3. اكتب "فجوة فضول" حقيقية بالخطاف: ابدأ بسؤال أو جملة تخلق تشويقاً وتؤجل الكشف عن الإجابة/المفارقة لبعد سطر أو سطرين، بحيث يضطر القارئ يكمل القراءة أو المشاهدة عشان يعرف الجواب.
+    4. اختم بسؤال حقيقي يحفّز الناس يكتبون تعليق (مو مجرد "شنو رأيك" عام، خليه سؤال مرتبط تحديداً بتفصيل الخبر).
+    5. اكتب بالعربية الفصحى المبسطة والسليمة 100% (لتجنب أخطاء نطق الراوي الآلي، بدون كلمات إنجليزية أو رموز يصعب نطقها).
 
-    استخدم هذا التنسيق بالضبط في ردك:
-    الملخص: (كلمتين إلى ثلاث كلمات تلخص جوهر الخبر بصرياً)
-    الصوت: (سيناريو تعليق صوتي بحدود 40 إلى 50 كلمة، يبدأ بـ Hook قوي جداً يشد المستمع من الثانية الأولى)
-    الكابشن: (منشور انستغرام: جملة افتتاحية مثيرة + تلخيص شيق للخبر في 3-5 جمل + دعوة للتفاعل + 10-15 هاشتاق عربي وإنجليزي مناسب)
+    استخدم هذا التنسيق بالضبط في ردك (بدون أي نص إضافي خارج هذا التنسيق):
+    الملخص: (كلمتين إلى ثلاث كلمات تلخص المشهد البصري الأنسب للتفصيل النادر، لتوليد صورة عنه)
+    الصوت: (سيناريو تعليق صوتي بحدود 40 إلى 55 كلمة: خطاف قوي بفجوة فضول + كشف تدريجي للتفصيل النادر)
+    الخطاف: (أول جملة بالمنشور، مطابقة لروح سيناريو الصوت، سؤال أو جملة صادمة قصيرة)
+    الجسم: (3 إلى 4 جمل تكشف التفصيل النادر تدريجياً بأسلوب قصصي شيق)
+    السؤال الختامي: (سؤال قصير مرتبط تحديداً بالخبر يحفّز التعليقات)
+    الهاشتاقات: (8 إلى 10 هاشتاقات عربية وإنجليزية مرتبطة تحديداً بموضوع الخبر، بدون هاشتاقات عامة مكررة)
     """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": text_prompt}],
-            temperature=0.8,
+            temperature=0.9,
         )
         full_text = response.choices[0].message.content.strip()
 
-        topic_summary = title
-        voice_script = f"هل تعلم أن {title}؟"
-        caption = full_text
+        topic_summary = _extract_field(full_text, "الملخص") or title
+        voice_script = _extract_field(full_text, "الصوت") or f"هل تعلم أن {title}؟"
+        hook = _extract_field(full_text, "الخطاف") or topic_summary
+        body = _extract_field(full_text, "الجسم") or summary[:300]
+        closing_question = _extract_field(full_text, "السؤال الختامي") or "شنو رأيكم؟ 👇"
+        hashtags = _extract_field(full_text, "الهاشتاقات") or "#رادار_نيوز #RadarNews"
 
-        for line in full_text.split('\n'):
-            if line.startswith("الملخص:"):
-                topic_summary = line.replace("الملخص:", "").replace("(", "").replace(")", "").strip()
-            elif line.startswith("الصوت:"):
-                voice_script = line.replace("الصوت:", "").replace("(", "").replace(")", "").strip()
-
-        if "الكابشن:" in full_text:
-            caption = full_text.split("الكابشن:")[1].strip()
+        # تيمبلت ثابت لصفحة "رادار نيوز" — نفس البنية تتكرر بكل منشور لبناء هوية مميزة للصفحة
+        caption = (
+            f"{hook}\n\n"
+            f"{body}\n\n"
+            f"💬 {closing_question}\n"
+            f"🔁 شير المنشور لصديق يحب الحقائق الغريبة\n\n"
+            f"{hashtags} #رادار_نيوز #RadarNews"
+        )
 
         print(f"✅ تم كتابة السيناريو: {topic_summary}")
         return topic_summary, voice_script, caption
@@ -227,6 +252,7 @@ def build_image_prompt(story, topic_summary):
                     f"- Vertical composition (9:16), no text\n"
                     f"- Masterpiece quality, highly detailed, cinematic lighting\n"
                     f"- No real people, no logos, no copyrighted elements\n"
+                    f"- Apply this {BRAND_VISUAL_STYLE}\n"
                     f"- Output the prompt only, no explanation"
                 ),
             },
@@ -294,7 +320,24 @@ def generate_cover_image(story, topic_summary):
 
 
 def generate_voice_over(text):
-    print("🎙️ جاري تسجيل الصوت بجودة HD بالفصحى...")
+    print("🎙️ جاري تسجيل صوت راوٍ طبيعي بالفصحى...")
+    try:
+        response = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="coral",
+            input=text,
+            instructions=(
+                "تحدث بالعربية الفصحى المبسطة كراوٍ عربي محترف بأسلوب وثائقي دافئ وواثق ومشوّق، "
+                "بسرعة معتدلة، مع وقفات طبيعية قصيرة بين الجمل، ونبرة فضول تشد المستمع من أول كلمة، "
+                "بدون أي رتابة أو نبرة آلية."
+            ),
+        )
+        with open(TEMP_AUDIO, "wb") as f:
+            f.write(response.content)
+        return True
+    except Exception as e:
+        print(f"⚠️ تعذر استخدام gpt-4o-mini-tts ({str(e)[:150]})، جاري المحاولة عبر tts-1-hd...")
+
     try:
         response = client.audio.speech.create(
             model="tts-1-hd",
@@ -305,7 +348,7 @@ def generate_voice_over(text):
             f.write(response.content)
         return True
     except Exception as e:
-        print(f"❌ خطأ في توليد الصوت: {e}")
+        print(f"❌ خطأ في توليد الصوت: {str(e)[:200]}")
         return False
 
 
