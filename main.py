@@ -17,6 +17,9 @@ from openai import OpenAI
 ACCESS_TOKEN = os.environ.get('IG_ACCESS_TOKEN')
 INSTAGRAM_ACCOUNT_ID = os.environ.get('IG_ACCOUNT_ID')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+# اختياريان: إذا تم ضبطهما، يُستخدم صوت ElevenLabs الواقعي بدل صوت OpenAI
+ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
+ELEVENLABS_VOICE_ID = os.environ.get('ELEVENLABS_VOICE_ID')
 
 SEEN_FILE = "seen_stories.json"
 TEMP_IMAGE = "temp_image.jpg"
@@ -59,9 +62,10 @@ RSS_FEEDS = [
 
 # هوية بصرية ثابتة تُضاف لكل صورة غلاف، عشان يكون فيه "تيمبلت" مرئي موحّد يميّز صفحة "رادار نيوز"
 BRAND_VISUAL_STYLE = (
-    "signature visual identity: deep midnight-blue and gold color palette, "
-    "dramatic cinematic rim lighting, dreamlike surreal digital-art style, "
-    "consistent with a mystery/curiosity documentary brand"
+    "signature visual identity: vibrant electric-blue and warm gold color palette, "
+    "bright glowing highlights, rich saturated colors, high contrast, well-lit scene "
+    "(never dark, dim, muddy, or low-key), energetic dreamlike surreal digital-art style, "
+    "consistent with an eye-catching curiosity/discovery brand"
 )
 
 
@@ -235,21 +239,27 @@ def build_image_prompt(story, topic_summary):
                 "role": "system",
                 "content": (
                     "You are an expert at writing DALL-E 3 image prompts for vertical Instagram Reels covers. "
-                    "Your prompts are vivid, visual, and always policy-safe. "
+                    "Your prompts are vivid, visual, and always policy-safe, written entirely in English. "
                     "Never include violence, blood, real people, political figures, "
-                    "logos, or copyrighted elements. Focus on scene, atmosphere, and concept."
+                    "logos, or copyrighted elements. Focus on scene, atmosphere, and concept. "
+                    "Never ask the model to render any text, letters, numbers, signs, or writing in the "
+                    "image, in any language or script — describe pure visuals only."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"Write a single DALL-E 3 image prompt for a vertical (9:16) Instagram Reel cover about this news story.\n\n"
-                    f"Core concept: {topic_summary}\n"
+                    f"Write a single DALL-E 3 image prompt for a vertical (9:16) Instagram Reel cover about this news story. "
+                    f"Translate the concept below into a purely visual English scene description — do not quote or embed "
+                    f"the original Arabic text anywhere in the prompt.\n\n"
+                    f"Core concept (Arabic, translate to a visual scene only): {topic_summary}\n"
                     f"Title: {title}\n"
                     f"Summary: {summary[:500]}\n\n"
                     f"Requirements:\n"
                     f"- Highly conceptual, surreal, cinematic illustration\n"
-                    f"- Vertical composition (9:16), no text\n"
+                    f"- Vertical composition (9:16)\n"
+                    f"- ABSOLUTELY NO text, letters, numbers, symbols, signage, or writing anywhere in the image, "
+                    f"in any language — this is critical, image models often render garbled text so avoid it entirely\n"
                     f"- Masterpiece quality, highly detailed, cinematic lighting\n"
                     f"- No real people, no logos, no copyrighted elements\n"
                     f"- Apply this {BRAND_VISUAL_STYLE}\n"
@@ -258,7 +268,7 @@ def build_image_prompt(story, topic_summary):
             },
         ],
         temperature=0.7,
-        max_tokens=200,
+        max_tokens=220,
     )
 
     return response.choices[0].message.content.strip()
@@ -319,8 +329,46 @@ def generate_cover_image(story, topic_summary):
         return False
 
 
+def _generate_voice_elevenlabs(text):
+    try:
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
+            headers={
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.8,
+                    "style": 0.4,
+                    "use_speaker_boost": True,
+                },
+            },
+            timeout=60,
+        )
+        if response.status_code == 200 and response.content:
+            with open(TEMP_AUDIO, "wb") as f:
+                f.write(response.content)
+            return True
+        print(f"⚠️ فشل ElevenLabs (HTTP {response.status_code}): {response.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"⚠️ خطأ في الاتصال بـ ElevenLabs: {str(e)[:200]}")
+        return False
+
+
 def generate_voice_over(text):
-    print("🎙️ جاري تسجيل صوت راوٍ طبيعي بالفصحى...")
+    if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
+        print("🎙️ جاري تسجيل صوت واقعي عبر ElevenLabs...")
+        if _generate_voice_elevenlabs(text):
+            return True
+        print("⚠️ سيتم التراجع لصوت OpenAI...")
+
+    print("🎙️ جاري تسجيل صوت راوٍ طبيعي بالفصحى (OpenAI)...")
     try:
         response = client.audio.speech.create(
             model="gpt-4o-mini-tts",
