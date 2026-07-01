@@ -3,6 +3,8 @@ import re
 import json
 import time
 import math
+import ctypes
+import ctypes.util
 import random
 import base64
 from io import BytesIO
@@ -13,7 +15,53 @@ import requests
 import schedule
 from flask import Flask
 from openai import OpenAI
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+
+
+# --- تحميل مكتبة libraqm يدوياً قبل أي استخدام لـ PIL ---
+# في بيئة Replit، حزمة libraqm (Nix) تُثبَّت بنجاح لكن مسارها لا يصل تلقائياً لمتغير
+# LD_LIBRARY_PATH بالعملية الجارية (فرق بين REPLIT_LD_LIBRARY_PATH ومتغير LD_LIBRARY_PATH
+# الفعلي)، فيفشل PIL بالعثور على raqm عبر آليته المعتادة (dlopen حسب اسم المكتبة فقط)،
+# ويرجع تلقائياً لمحرك "BASIC" الذي يرسم حروف الكلمة الواحدة بترتيب المصفوفة النصية
+# مباشرة بدون تشكيل عربي ولا BiDi -> هذا هو سبب انعكاس الحروف داخل كل كلمة (وليس bug بالكود).
+# الحل: نحمّل ملف libraqm.so بأنفسنا عبر ctypes مع RTLD_GLOBAL، فيصبح متوفراً بالذاكرة
+# ويجده PIL عند أول استخدام لمحرك RAQM، بدون أي اعتماد على متغيرات البيئة أو ترتيب الإقلاع.
+def _preload_native_raqm():
+    lib_name = ctypes.util.find_library("raqm")
+    if lib_name:
+        try:
+            ctypes.CDLL(lib_name, mode=ctypes.RTLD_GLOBAL)
+            return True
+        except OSError:
+            pass
+
+    # مهم: لا نستخدم glob على /nix/store مباشرة (فحص المجلد بالكامل قد يتجمّد لثوانٍ طويلة
+    # في بيئة Replit لضخامته). بدلاً من ذلك نقرأ المسارات الجاهزة التي وفّرها Nix نفسه
+    # بمتغيرات البيئة (فحص وجود ملف واحد محدد المسار = فوري، بعكس مسح مجلد كامل).
+    candidate_dirs = []
+    for var in ("REPLIT_LD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        value = os.environ.get(var, "")
+        candidate_dirs.extend(p for p in value.split(":") if p)
+
+    for directory in candidate_dirs:
+        for filename in ("libraqm.so.0", "libraqm.so"):
+            path = os.path.join(directory, filename)
+            if os.path.exists(path):
+                try:
+                    ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                    return True
+                except OSError:
+                    continue
+
+    print("WARNING: libraqm not found on this system — Arabic text shaping/order may render incorrectly.")
+    return False
+
+
+_RAQM_AVAILABLE = _preload_native_raqm()
+
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, features
+
+if _RAQM_AVAILABLE and not features.check("raqm"):
+    print("WARNING: libraqm was loaded but Pillow still doesn't report raqm support.")
 
 from assets.fonts.font_data import NOTO_KUFI_ARABIC_BOLD_B64, LIBERATION_SANS_BOLD_B64
 
@@ -39,11 +87,11 @@ LIBERATION_SANS_BOLD_BYTES = base64.b64decode(LIBERATION_SANS_BOLD_B64)
 
 
 def _load_headline_font(size):
-    return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size)
+    return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size, layout_engine=ImageFont.Layout.RAQM)
 
 
 def _load_latin_font(size):
-    return ImageFont.truetype(BytesIO(LIBERATION_SANS_BOLD_BYTES), size)
+    return ImageFont.truetype(BytesIO(LIBERATION_SANS_BOLD_BYTES), size, layout_engine=ImageFont.Layout.RAQM)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
@@ -115,16 +163,17 @@ def save_seen_story(story_id):
 
 
 # --- رسم النص العربي بشكل متين ومستقل عن بيئة التشغيل ---
-# الأساس المؤكد بالاختبار المباشر:
-#   * محرك عرض الخط يصل حروف الكلمة الواحدة ويرتّبها داخلياً بشكل صحيح (بوجود raqm أو بدونه).
-#   * لكن ترتيب الكلمات (BiDi على مستوى الجملة) لا يُطبَّق بشكل موثوق في كل البيئات
-#     (يعمل ببيئتنا، ولا يعمل ببيئة Replit مثلاً -> كان يظهر ترتيب الكلمات معكوساً).
-#   * التشكيل اليدوي المسبق (arabic_reshaper) يُنتج مربعات فارغة لأن الخط لا يملك الأشكال التقديمية.
-# لذلك: نرسم كل كلمة على حدة (فيصلها المحرك صحيحاً)، ونرتّب الكلمات يميناً->يساراً بأنفسنا في الكود.
-# هكذا الترتيب تحت سيطرتنا الكاملة ولا يعتمد على سلوك المحرك المتغيّر بين البيئات.
+# التشخيص المؤكد: بدون مكتبة libraqm فعلياً متوفرة لـ PIL، يرجع محرك الخط لوضع "BASIC"
+# الذي يرسم حروف أي كلمة عربية بترتيب المصفوفة النصية مباشرة (بدون تشكيل ولا BiDi) ->
+# هذا يعكس ترتيب الحروف داخل كل كلمة (وسابقاً كان يعكس ترتيب الكلمات كذلك حسب البيئة).
+# تم تثبيت التبعية النظامية (Nix) libraqm وتحميلها يدوياً عبر ctypes قبل أي استخدام لـ PIL
+# (انظر _preload_native_raqm أعلى الملف)، وربط الخطوط بمحرك ImageFont.Layout.RAQM.
+# بهذا يقوم raqm بنفسه بتشكيل حروف كل كلمة وترتيبها بصرياً بشكل صحيح تلقائياً.
+# نبقي رسم كل كلمة على حدة وترتيب الكلمات يميناً->يساراً بأنفسنا (هذا الجزء كان صحيحاً دوماً)
+# لأنه ضروري لتلوين كلمات التمييز بلون مختلف عن باقي العنوان.
 
 def _word_advance(draw, word, font):
-    return draw.textlength(word, font=font)
+    return draw.textlength(word, font=font, direction="rtl", language="ar")
 
 
 def _wrap_arabic_words(draw, text, font, max_width):
@@ -157,7 +206,8 @@ def _draw_rtl_line(draw, center_x, y, words, font, normal_color, highlight_color
         x_cursor -= adv
         color = highlight_color if word.strip(".,،؟!") in highlight_words else normal_color
         draw.text((x_cursor, y), word, font=font, fill=color, anchor="la",
-                   stroke_width=stroke_width, stroke_fill=stroke_fill)
+                   stroke_width=stroke_width, stroke_fill=stroke_fill,
+                   direction="rtl", language="ar")
         x_cursor -= space_w
 
 

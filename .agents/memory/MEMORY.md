@@ -1,0 +1,1 @@
+- [Pillow Arabic text shaping on Replit](pillow-raqm-replit.md) — libraqm installs via Nix but its lib path doesn't reach the process's LD_LIBRARY_PATH; must force-load it manually.
