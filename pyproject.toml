@@ -7,6 +7,7 @@ dependencies = [
     "feedparser>=6.0.12",
     "flask>=3.0.0",
     "openai>=2.34.0",
+    "pillow>=12.3.0",
     "requests>=2.33.1",
     "schedule>=1.2.0",
 ]
