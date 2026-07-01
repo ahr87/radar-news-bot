@@ -8,11 +8,9 @@ import base64
 from io import BytesIO
 from threading import Thread
 
-import arabic_reshaper
 import feedparser
 import requests
 import schedule
-from bidi.algorithm import get_display
 from flask import Flask
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
@@ -40,9 +38,26 @@ NOTO_KUFI_ARABIC_BOLD_BYTES = base64.b64decode(NOTO_KUFI_ARABIC_BOLD_B64)
 LIBERATION_SANS_BOLD_BYTES = base64.b64decode(LIBERATION_SANS_BOLD_B64)
 
 
-def _load_headline_font(size, layout_engine=None):
-    kwargs = {"layout_engine": layout_engine} if layout_engine is not None else {}
-    return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size, **kwargs)
+def _resolve_basic_layout_engine():
+    """يحدد قيمة محرك التخطيط الأساسي بشكل متوافق مع كل إصدارات Pillow (القديمة والحديثة تختلف بتسميته)."""
+    layout = getattr(ImageFont, "Layout", None)
+    if layout is not None and hasattr(layout, "BASIC"):
+        return layout.BASIC
+    return getattr(ImageFont, "LAYOUT_BASIC", None)
+
+
+_BASIC_LAYOUT_ENGINE = _resolve_basic_layout_engine()
+
+
+def _load_headline_font(size, use_basic_layout=False):
+    """يحمّل الخط العربي المضمّن. عند use_basic_layout=True يحاول فرض محرك التخطيط الأساسي،
+    وإذا فشل ذلك لأي سبب (اختلاف إصدار Pillow مثلاً) يعود تلقائياً للتحميل الافتراضي بدل رفع استثناء."""
+    if use_basic_layout and _BASIC_LAYOUT_ENGINE is not None:
+        try:
+            return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size, layout_engine=_BASIC_LAYOUT_ENGINE)
+        except Exception:
+            pass
+    return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size)
 
 
 def _load_latin_font(size):
@@ -117,76 +132,91 @@ def save_seen_story(story_id):
         json.dump(list(seen), f, ensure_ascii=False, indent=2)
 
 
-def _shape_arabic_fallback(text):
-    """يشكّل النص العربي يدوياً (بدون الحاجة لمكتبة raqm) لضمان عمله بأي بيئة."""
-    return get_display(arabic_reshaper.reshape(text))
+_ARABIC_RENDER_MODE = "unknown"
 
 
-_ARABIC_FONT_HEALTHY = None
-
-
-def _render_char_bytes(font, ch):
+def _render_char_bytes(font, ch, **kwargs):
     img = Image.new("L", (140, 100), 0)
     draw = ImageDraw.Draw(img)
-    draw.text((10, 10), ch, font=font, fill=255)
+    draw.text((10, 10), ch, font=font, fill=255, **kwargs)
     return img.tobytes()
 
 
-def _arabic_font_healthy():
-    """يتحقق فعلياً أن الخط يرسم حرفاً عربياً حقيقياً، لا مجرد رمز 'مربع مفقود' (tofu) عام.
+def _detect_arabic_render_mode():
+    """يحدد مرة واحدة أي طريقة عرض تنتج فعلاً حروفاً عربية مرئية (لا رمز 'الحرف المفقود' tofu) بهذه البيئة.
 
-    الفحص القديم كان يكتفي بالتأكد من وجود أي حبر بالصورة، وهذا خاطئ لأن رمز
-    'الحرف المفقود' نفسه يُرسم بحبر ظاهر (مربع بحدود) - فكان يمرّ الفحص رغم فشل العرض فعلياً.
-    الفحص الصحيح: نقارن رسم حرف عربي حقيقي برسم رمز من نطاق غير مستخدم إطلاقاً (Private Use Area)،
-    وهذا الأخير يُرسم دائماً كرمز 'مفقود' من أي خط عادي. لو تطابقا، فالخط لا يدعم العربية فعلياً هنا.
+    مهم: النص يُمرَّر دائماً خاماً بدون أي تشكيل يدوي مسبق (لا arabic_reshaper ولا bidi) - كلا محرّكي
+    Pillow (raqm والمحرك الأساسي BASIC) يقومان بتشكيل الحروف وترتيبها آلياً بأنفسهما. التشكيل اليدوي
+    المسبق كان هو سبب ظهور المربعات الفارغة: تمرير نص مُشكَّل مسبقاً لأي من المحركين يجعله يحاول
+    "تشكيله" مرة ثانية فينتج رموز غير موجودة بالخط (تحقّقنا من هذا مباشرة بالاختبار).
+
+    الفحص: نقارن رسم حرف عربي حقيقي (خام) برسم رمز من نطاق غير مستخدم إطلاقاً (Private Use Area)
+    يُرسم دائماً كرمز 'مفقود' من أي خط عادي؛ لو تطابقا فالطريقة لا تعمل فعلياً، وننتقل للتالية.
+    يجرّب بالترتيب: raqm (أفضل جودة، يحتاج مكتبة raqm) -> المحرك الأساسي BASIC (مدمج بكل نسخ Pillow،
+    يدعم تشكيل العربي وترتيبه ذاتياً بدون أي مكتبات خارجية) -> لا شيء يعمل (حالة نادرة جداً؛ يُبلَّغ
+    بخطأ واضح، ويُعرض بدون الكتابة المرسومة على الصورة كملاذ أخير).
     """
-    global _ARABIC_FONT_HEALTHY
-    if _ARABIC_FONT_HEALTHY is not None:
-        return _ARABIC_FONT_HEALTHY
-    try:
-        test_font = _load_headline_font(80, layout_engine=ImageFont.Layout.BASIC)
-        arabic_bytes = _render_char_bytes(test_font, "ا")
-        notdef_bytes = _render_char_bytes(test_font, chr(0xE000))  # Private Use Area: لا يوجد بأي خط عادي
-        _ARABIC_FONT_HEALTHY = arabic_bytes != notdef_bytes
-        if not _ARABIC_FONT_HEALTHY:
-            print("ERROR: embedded Arabic font's glyphs are visually identical to the missing-character "
-                  "placeholder in this environment - Arabic text will not render correctly here. "
-                  "Skipping on-image Arabic text as a safety net (caption text is unaffected).")
-    except Exception as e:
-        _ARABIC_FONT_HEALTHY = False
-        print(f"ERROR: could not load embedded Arabic font: {str(e)[:200]}")
-    return _ARABIC_FONT_HEALTHY
+    global _ARABIC_RENDER_MODE
+    if _ARABIC_RENDER_MODE != "unknown":
+        return _ARABIC_RENDER_MODE
 
+    probe_img = Image.new("L", (140, 100), 0)
+    probe_draw = ImageDraw.Draw(probe_img)
 
-def _raqm_renders_correctly(draw, font):
-    """يتحقق أن raqm (إن وُجد) ينتج فعلاً رسماً صحيحاً، بدل الاعتماد على استثناء قد لا يُرفع."""
     try:
-        bbox = draw.textbbox((0, 0), "الف", font=font, direction="rtl", language="ar")
-        return bool(bbox) and (bbox[2] - bbox[0]) > 5
+        raqm_font = _load_headline_font(80)
+        notdef_bytes = _render_char_bytes(raqm_font, chr(0xE000), direction="rtl", language="ar")
+        bbox = probe_draw.textbbox((0, 0), "الف", font=raqm_font, direction="rtl", language="ar")
+        if bbox and (bbox[2] - bbox[0]) > 5 and _render_char_bytes(raqm_font, "ا", direction="rtl", language="ar") != notdef_bytes:
+            _ARABIC_RENDER_MODE = "raqm"
+            print("Arabic rendering: using raqm shaping.")
+            return _ARABIC_RENDER_MODE
     except Exception:
-        return False
+        pass
+
+    try:
+        basic_font = _load_headline_font(80, use_basic_layout=True)
+        notdef_bytes = _render_char_bytes(basic_font, chr(0xE000))
+        if _render_char_bytes(basic_font, "ا") != notdef_bytes:
+            _ARABIC_RENDER_MODE = "basic"
+            print("Arabic rendering: using Pillow's built-in BASIC layout engine (raqm unavailable here).")
+            return _ARABIC_RENDER_MODE
+    except Exception:
+        pass
+
+    _ARABIC_RENDER_MODE = None
+    print("ERROR: the embedded Arabic font cannot render visible Arabic glyphs in this environment "
+          "(tried both raqm and the BASIC layout engine - both produced the missing-glyph placeholder). "
+          "Skipping on-image Arabic text as a last-resort safety net; the full headline is still in the caption text.")
+    return _ARABIC_RENDER_MODE
+
+
+def _arabic_font_healthy():
+    return _detect_arabic_render_mode() is not None
 
 
 def _arabic_textbbox(draw, text, font):
-    if not _arabic_font_healthy():
-        return draw.textbbox((0, 0), text, font=font)
-    if _raqm_renders_correctly(draw, font):
+    mode = _detect_arabic_render_mode()
+    if mode == "raqm":
         return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
-    return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_load_headline_font(font.size, layout_engine=ImageFont.Layout.BASIC))
+    if mode == "basic":
+        basic_font = _load_headline_font(font.size, use_basic_layout=True)
+        return draw.textbbox((0, 0), text, font=basic_font)
+    return draw.textbbox((0, 0), text, font=font)
 
 
 def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", stroke_width=0, stroke_fill=None):
-    if not _arabic_font_healthy():
-        draw.text(xy, text, font=font, fill=fill, anchor=anchor, align=align,
-                   stroke_width=stroke_width, stroke_fill=stroke_fill)
-        return
-    if _raqm_renders_correctly(draw, font):
+    mode = _detect_arabic_render_mode()
+    if mode == "raqm":
         draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align,
                    stroke_width=stroke_width, stroke_fill=stroke_fill)
-    else:
-        basic_font = _load_headline_font(font.size, layout_engine=ImageFont.Layout.BASIC)
-        draw.text(xy, _shape_arabic_fallback(text), font=basic_font, fill=fill, anchor=anchor,
+    elif mode == "basic":
+        basic_font = _load_headline_font(font.size, use_basic_layout=True)
+        draw.text(xy, text, font=basic_font, fill=fill, anchor=anchor,
                    align=align, stroke_width=stroke_width, stroke_fill=stroke_fill)
+    else:
+        draw.text(xy, text, font=font, fill=fill, anchor=anchor, align=align,
+                   stroke_width=stroke_width, stroke_fill=stroke_fill)
 
 
 def _wrap_arabic_text(draw, text, font, max_width):
@@ -471,9 +501,29 @@ def apply_brand_template(image_path, headline, highlight):
         img = img.convert("RGBA")
 
         width, height = img.size
-        panel_height = int(height * 0.40)
+        measure_draw = ImageDraw.Draw(img)
+
+        # نحسب عدد أسطر العنوان أولاً، لأن ارتفاع اللوحة يعتمد عليها (يمنع أي تداخل مع مقبض العلامة)
+        headline_healthy = _arabic_font_healthy()
+        headline_text = _sanitize_headline(headline) if headline_healthy else ""
+        headline_font = _load_headline_font(max(40, width // 15))
+        max_text_width = int(width * 0.88)
+        lines = _wrap_arabic_text(measure_draw, headline_text, headline_font, max_text_width) if headline_text else []
+        if not headline_healthy:
+            print("WARNING: skipping on-image Arabic headline (font unhealthy in this environment); full headline is still in the caption text.")
+
+        icon_r = int(width * 0.032)
+        line_height = int(width // 15 * 1.3)
+        handle_font_size = max(18, width // 38)
+        handle_area = int(handle_font_size * 2.6)
+        blend_zone = int(height * 0.05)
+        top_margin = icon_r * 2 + 48
+        bottom_margin = 36
+
+        # ارتفاع اللوحة يُحسب من كل العناصر الفعلية اللي بتُرسم بداخلها (لا رقم ثابت)، مع سقف وحد أدنى معقولين
+        content_height = blend_zone + top_margin + line_height * max(1, len(lines)) + handle_area + bottom_margin
+        panel_height = max(int(height * 0.28), min(content_height, height - int(height * 0.04)))
         panel_top = height - panel_height
-        blend_zone = int(panel_height * 0.22)
 
         # تدرّج ناعم من الصورة إلى اللوحة الداكنة الصلبة أسفلها
         gradient = Image.new("RGBA", (width, panel_height), (10, 10, 14, 255))
@@ -486,33 +536,23 @@ def apply_brand_template(image_path, headline, highlight):
         draw = ImageDraw.Draw(img)
 
         # أيقونة رادار صغيرة أعلى اللوحة (بدل أي شعار نصي، لتفادي أي مشاكل خط)
-        icon_r = int(width * 0.032)
         icon_cy = panel_top + blend_zone + icon_r + 14
         _draw_radar_icon(draw, (width // 2, icon_cy), icon_r, BRAND_ACCENT_COLOR + (255,))
 
         # العنوان الكبير أسفل الصورة، مع تمييز لوني لأهم جزء فيه
-        # (إذا كان الخط العربي معطوباً بهذه البيئة، نتخطى رسمه بدل نشر مربعات مكسورة - الكابشن يحمل النص كاملاً أصلاً)
-        if _arabic_font_healthy():
-            headline_text = _sanitize_headline(headline)
-            headline_font = _load_headline_font(max(40, width // 15))
-            max_text_width = int(width * 0.88)
-            lines = _wrap_arabic_text(draw, headline_text, headline_font, max_text_width)
-
+        y_cursor = icon_cy + icon_r + 34
+        if lines:
             highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
-
-            line_height = int(width // 15 * 1.3)
-            y_cursor = icon_cy + icon_r + 34
             for line in lines:
                 _draw_arabic_line_mixed(draw, width // 2, y_cursor, line, headline_font,
                                          (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words)
                 y_cursor += line_height
-        else:
-            print("WARNING: skipping on-image Arabic headline (font unhealthy in this environment); full headline is still in the caption text.")
 
-        # مقبض العلامة التجارية أسفل اللوحة تماماً (خط لاتيني مخصص، لضمان عرض سليم لاسم العلامة الإنكليزي)
-        handle_font = _load_latin_font(max(18, width // 38))
+        # مقبض العلامة التجارية أسفل اللوحة، بمسافة ديناميكية بعد آخر سطر بالعنوان (مع سقف يمنعه يتجاوز حدود الصورة)
+        handle_font = _load_latin_font(handle_font_size)
         handle_text = f">> {BRAND_HANDLE}"
-        draw.text((width // 2, height - 42), handle_text, font=handle_font,
+        handle_y = min(y_cursor + handle_area // 2 + 12, height - bottom_margin - handle_font_size // 2)
+        draw.text((width // 2, handle_y), handle_text, font=handle_font,
                    fill=BRAND_ACCENT_COLOR + (255,), anchor="mm")
 
         img.convert("RGB").save(image_path, "JPEG", quality=95)
