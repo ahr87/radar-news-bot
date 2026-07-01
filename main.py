@@ -3,6 +3,7 @@ import re
 import json
 import time
 import random
+import base64
 import subprocess
 from threading import Thread
 
@@ -237,6 +238,16 @@ def build_image_prompt(story, topic_summary):
     return response.choices[0].message.content.strip()
 
 
+def _save_generated_image(image_response):
+    data = image_response.data[0]
+    if getattr(data, "url", None):
+        img_data = requests.get(data.url).content
+    else:
+        img_data = base64.b64decode(data.b64_json)
+    with open(TEMP_IMAGE, "wb") as handler:
+        handler.write(img_data)
+
+
 def generate_cover_image(story, topic_summary):
     print("🎨 جاري بناء برومبت آمن للصورة...")
     try:
@@ -245,7 +256,7 @@ def generate_cover_image(story, topic_summary):
         print(f"❌ تعذر بناء برومبت الصورة: {e}")
         return False
 
-    print("🎨 جاري رسم اللوحة السريالية...")
+    print("🎨 جاري رسم اللوحة السريالية (dall-e-3)...")
     try:
         image_response = client.images.generate(
             model="dall-e-3",
@@ -254,17 +265,31 @@ def generate_cover_image(story, topic_summary):
             quality="hd",
             n=1,
         )
-        image_url = image_response.data[0].url
-        img_data = requests.get(image_url).content
-        with open(TEMP_IMAGE, "wb") as handler:
-            handler.write(img_data)
+        _save_generated_image(image_response)
         return True
     except Exception as e:
         error_msg = str(e)
         if "content_policy_violation" in error_msg or "safety system" in error_msg.lower():
             print(f"⚠️ رفض DALL-E توليد هذه الصورة بسبب سياسة المحتوى: {error_msg[:200]}")
+            return False
+        print(f"⚠️ تعذر استخدام dall-e-3 ({error_msg[:150]})، جاري المحاولة عبر gpt-image-1...")
+
+    try:
+        image_response = client.images.generate(
+            model="gpt-image-1",
+            prompt=image_prompt,
+            size="1024x1536",
+            quality="high",
+            n=1,
+        )
+        _save_generated_image(image_response)
+        return True
+    except Exception as e:
+        error_msg = str(e)
+        if "content_policy_violation" in error_msg or "safety system" in error_msg.lower():
+            print(f"⚠️ رفض gpt-image-1 توليد هذه الصورة بسبب سياسة المحتوى: {error_msg[:200]}")
         else:
-            print(f"❌ خطأ في توليد الصورة: {error_msg[:200]}")
+            print(f"❌ خطأ في توليد الصورة عبر gpt-image-1: {error_msg[:200]}")
         return False
 
 
