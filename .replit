@@ -20,6 +20,14 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [[ports]]
+localPort = 5000
+externalPort = 5000
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
@@ -29,3 +37,4 @@ externalPort = 80
 
 [nix]
 channel = "stable-25_05"
+packages = ["psmisc", "apk-tools"]
