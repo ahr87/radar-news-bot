@@ -38,25 +38,7 @@ NOTO_KUFI_ARABIC_BOLD_BYTES = base64.b64decode(NOTO_KUFI_ARABIC_BOLD_B64)
 LIBERATION_SANS_BOLD_BYTES = base64.b64decode(LIBERATION_SANS_BOLD_B64)
 
 
-def _resolve_basic_layout_engine():
-    """يحدد قيمة محرك التخطيط الأساسي بشكل متوافق مع كل إصدارات Pillow (القديمة والحديثة تختلف بتسميته)."""
-    layout = getattr(ImageFont, "Layout", None)
-    if layout is not None and hasattr(layout, "BASIC"):
-        return layout.BASIC
-    return getattr(ImageFont, "LAYOUT_BASIC", None)
-
-
-_BASIC_LAYOUT_ENGINE = _resolve_basic_layout_engine()
-
-
-def _load_headline_font(size, use_basic_layout=False):
-    """يحمّل الخط العربي المضمّن. عند use_basic_layout=True يحاول فرض محرك التخطيط الأساسي،
-    وإذا فشل ذلك لأي سبب (اختلاف إصدار Pillow مثلاً) يعود تلقائياً للتحميل الافتراضي بدل رفع استثناء."""
-    if use_basic_layout and _BASIC_LAYOUT_ENGINE is not None:
-        try:
-            return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size, layout_engine=_BASIC_LAYOUT_ENGINE)
-        except Exception:
-            pass
+def _load_headline_font(size):
     return ImageFont.truetype(BytesIO(NOTO_KUFI_ARABIC_BOLD_BYTES), size)
 
 
@@ -132,127 +114,50 @@ def save_seen_story(story_id):
         json.dump(list(seen), f, ensure_ascii=False, indent=2)
 
 
-_ARABIC_RENDER_MODE = "unknown"
+# --- رسم النص العربي بشكل متين ومستقل عن بيئة التشغيل ---
+# الأساس المؤكد بالاختبار المباشر:
+#   * محرك عرض الخط يصل حروف الكلمة الواحدة ويرتّبها داخلياً بشكل صحيح (بوجود raqm أو بدونه).
+#   * لكن ترتيب الكلمات (BiDi على مستوى الجملة) لا يُطبَّق بشكل موثوق في كل البيئات
+#     (يعمل ببيئتنا، ولا يعمل ببيئة Replit مثلاً -> كان يظهر ترتيب الكلمات معكوساً).
+#   * التشكيل اليدوي المسبق (arabic_reshaper) يُنتج مربعات فارغة لأن الخط لا يملك الأشكال التقديمية.
+# لذلك: نرسم كل كلمة على حدة (فيصلها المحرك صحيحاً)، ونرتّب الكلمات يميناً->يساراً بأنفسنا في الكود.
+# هكذا الترتيب تحت سيطرتنا الكاملة ولا يعتمد على سلوك المحرك المتغيّر بين البيئات.
+
+def _word_advance(draw, word, font):
+    return draw.textlength(word, font=font)
 
 
-def _render_char_bytes(font, ch, **kwargs):
-    img = Image.new("L", (140, 100), 0)
-    draw = ImageDraw.Draw(img)
-    draw.text((10, 10), ch, font=font, fill=255, **kwargs)
-    return img.tobytes()
-
-
-def _detect_arabic_render_mode():
-    """يحدد مرة واحدة أي طريقة عرض تنتج فعلاً حروفاً عربية مرئية (لا رمز 'الحرف المفقود' tofu) بهذه البيئة.
-
-    مهم: النص يُمرَّر دائماً خاماً بدون أي تشكيل يدوي مسبق (لا arabic_reshaper ولا bidi) - كلا محرّكي
-    Pillow (raqm والمحرك الأساسي BASIC) يقومان بتشكيل الحروف وترتيبها آلياً بأنفسهما. التشكيل اليدوي
-    المسبق كان هو سبب ظهور المربعات الفارغة: تمرير نص مُشكَّل مسبقاً لأي من المحركين يجعله يحاول
-    "تشكيله" مرة ثانية فينتج رموز غير موجودة بالخط (تحقّقنا من هذا مباشرة بالاختبار).
-
-    الفحص: نقارن رسم حرف عربي حقيقي (خام) برسم رمز من نطاق غير مستخدم إطلاقاً (Private Use Area)
-    يُرسم دائماً كرمز 'مفقود' من أي خط عادي؛ لو تطابقا فالطريقة لا تعمل فعلياً، وننتقل للتالية.
-    يجرّب بالترتيب: raqm (أفضل جودة، يحتاج مكتبة raqm) -> المحرك الأساسي BASIC (مدمج بكل نسخ Pillow،
-    يدعم تشكيل العربي وترتيبه ذاتياً بدون أي مكتبات خارجية) -> لا شيء يعمل (حالة نادرة جداً؛ يُبلَّغ
-    بخطأ واضح، ويُعرض بدون الكتابة المرسومة على الصورة كملاذ أخير).
-    """
-    global _ARABIC_RENDER_MODE
-    if _ARABIC_RENDER_MODE != "unknown":
-        return _ARABIC_RENDER_MODE
-
-    probe_img = Image.new("L", (140, 100), 0)
-    probe_draw = ImageDraw.Draw(probe_img)
-
-    try:
-        raqm_font = _load_headline_font(80)
-        notdef_bytes = _render_char_bytes(raqm_font, chr(0xE000), direction="rtl", language="ar")
-        bbox = probe_draw.textbbox((0, 0), "الف", font=raqm_font, direction="rtl", language="ar")
-        if bbox and (bbox[2] - bbox[0]) > 5 and _render_char_bytes(raqm_font, "ا", direction="rtl", language="ar") != notdef_bytes:
-            _ARABIC_RENDER_MODE = "raqm"
-            print("Arabic rendering: using raqm shaping.")
-            return _ARABIC_RENDER_MODE
-    except Exception:
-        pass
-
-    try:
-        basic_font = _load_headline_font(80, use_basic_layout=True)
-        notdef_bytes = _render_char_bytes(basic_font, chr(0xE000))
-        if _render_char_bytes(basic_font, "ا") != notdef_bytes:
-            _ARABIC_RENDER_MODE = "basic"
-            print("Arabic rendering: using Pillow's built-in BASIC layout engine (raqm unavailable here).")
-            return _ARABIC_RENDER_MODE
-    except Exception:
-        pass
-
-    _ARABIC_RENDER_MODE = None
-    print("ERROR: the embedded Arabic font cannot render visible Arabic glyphs in this environment "
-          "(tried both raqm and the BASIC layout engine - both produced the missing-glyph placeholder). "
-          "Skipping on-image Arabic text as a last-resort safety net; the full headline is still in the caption text.")
-    return _ARABIC_RENDER_MODE
-
-
-def _arabic_font_healthy():
-    return _detect_arabic_render_mode() is not None
-
-
-def _arabic_textbbox(draw, text, font):
-    mode = _detect_arabic_render_mode()
-    if mode == "raqm":
-        return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
-    if mode == "basic":
-        basic_font = _load_headline_font(font.size, use_basic_layout=True)
-        return draw.textbbox((0, 0), text, font=basic_font)
-    return draw.textbbox((0, 0), text, font=font)
-
-
-def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", stroke_width=0, stroke_fill=None):
-    mode = _detect_arabic_render_mode()
-    if mode == "raqm":
-        draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align,
-                   stroke_width=stroke_width, stroke_fill=stroke_fill)
-    elif mode == "basic":
-        basic_font = _load_headline_font(font.size, use_basic_layout=True)
-        draw.text(xy, text, font=basic_font, fill=fill, anchor=anchor,
-                   align=align, stroke_width=stroke_width, stroke_fill=stroke_fill)
-    else:
-        draw.text(xy, text, font=font, fill=fill, anchor=anchor, align=align,
-                   stroke_width=stroke_width, stroke_fill=stroke_fill)
-
-
-def _wrap_arabic_text(draw, text, font, max_width):
+def _wrap_arabic_words(draw, text, font, max_width):
+    """يقسّم النص إلى أسطر، كل سطر قائمة كلمات (بترتيبها المنطقي)، بحيث لا يتجاوز عرض السطر max_width."""
     words = text.split()
-    lines, current = [], ""
+    space_w = _word_advance(draw, " ", font)
+    lines, current, current_w = [], [], 0
     for word in words:
-        candidate = f"{current} {word}".strip()
-        bbox = _arabic_textbbox(draw, candidate, font)
-        if bbox[2] - bbox[0] <= max_width or not current:
-            current = candidate
-        else:
+        w = _word_advance(draw, word, font)
+        add_w = w + (space_w if current else 0)
+        if current and current_w + add_w > max_width:
             lines.append(current)
-            current = word
+            current, current_w = [word], w
+        else:
+            current.append(word)
+            current_w += add_w
     if current:
         lines.append(current)
     return lines
 
 
-def _space_width(draw, font):
-    with_space = _arabic_textbbox(draw, "و و", font)
-    without_space = _arabic_textbbox(draw, "وو", font)
-    return max(10, (with_space[2] - with_space[0]) - (without_space[2] - without_space[0]))
-
-
-def _draw_arabic_line_mixed(draw, center_x, y, line, font, normal_color, highlight_color, highlight_words, stroke_width=0):
-    """يرسم سطراً عربياً بترتيب RTL صحيح، مع تلوين الكلمات الموجودة بـ highlight_words بلون مختلف."""
-    words = line.split()
-    widths = [_arabic_textbbox(draw, w, font)[2] - _arabic_textbbox(draw, w, font)[0] for w in words]
-    space_w = _space_width(draw, font)
-    total_w = sum(widths) + space_w * max(0, len(words) - 1)
-    x_cursor = center_x + total_w // 2
-    for word, w in zip(words, widths):
-        x_cursor -= w
+def _draw_rtl_line(draw, center_x, y, words, font, normal_color, highlight_color, highlight_words,
+                    stroke_width=0, stroke_fill=None):
+    """يرسم قائمة كلمات عربية بترتيب يميني صحيح حول مركز أفقي، مع تلوين كلمات التمييز بلون مختلف."""
+    space_w = _word_advance(draw, " ", font)
+    advances = [_word_advance(draw, w, font) for w in words]
+    total_w = sum(advances) + space_w * max(0, len(words) - 1)
+    x_cursor = center_x + total_w / 2
+    for word, adv in zip(words, advances):
+        x_cursor -= adv
         color = highlight_color if word.strip(".,،؟!") in highlight_words else normal_color
-        _draw_arabic_text(draw, (x_cursor, y), word, font, color, anchor="la",
-                           stroke_width=stroke_width, stroke_fill=(0, 0, 0, 255) if stroke_width else None)
+        draw.text((x_cursor, y), word, font=font, fill=color, anchor="la",
+                   stroke_width=stroke_width, stroke_fill=stroke_fill)
         x_cursor -= space_w
 
 
@@ -503,14 +408,11 @@ def apply_brand_template(image_path, headline, highlight):
         width, height = img.size
         measure_draw = ImageDraw.Draw(img)
 
-        # نحسب عدد أسطر العنوان أولاً، لأن ارتفاع اللوحة يعتمد عليها (يمنع أي تداخل مع مقبض العلامة)
-        headline_healthy = _arabic_font_healthy()
-        headline_text = _sanitize_headline(headline) if headline_healthy else ""
+        # نحسب أسطر العنوان أولاً (كل سطر قائمة كلمات)، لأن ارتفاع اللوحة يعتمد عليها (يمنع أي تداخل)
+        headline_text = _sanitize_headline(headline)
         headline_font = _load_headline_font(max(40, width // 15))
         max_text_width = int(width * 0.88)
-        lines = _wrap_arabic_text(measure_draw, headline_text, headline_font, max_text_width) if headline_text else []
-        if not headline_healthy:
-            print("WARNING: skipping on-image Arabic headline (font unhealthy in this environment); full headline is still in the caption text.")
+        lines = _wrap_arabic_words(measure_draw, headline_text, headline_font, max_text_width) if headline_text else []
 
         icon_r = int(width * 0.032)
         line_height = int(width // 15 * 1.3)
@@ -539,14 +441,15 @@ def apply_brand_template(image_path, headline, highlight):
         icon_cy = panel_top + blend_zone + icon_r + 14
         _draw_radar_icon(draw, (width // 2, icon_cy), icon_r, BRAND_ACCENT_COLOR + (255,))
 
-        # العنوان الكبير أسفل الصورة، مع تمييز لوني لأهم جزء فيه
+        # العنوان الكبير أسفل الصورة، مع تمييز لوني لأهم جزء فيه (كل كلمة تُرسم منفردة بترتيب يميني)
         y_cursor = icon_cy + icon_r + 34
-        if lines:
-            highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
-            for line in lines:
-                _draw_arabic_line_mixed(draw, width // 2, y_cursor, line, headline_font,
-                                         (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words)
-                y_cursor += line_height
+        highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
+        stroke_w = max(2, width // 260)
+        for line_words in lines:
+            _draw_rtl_line(draw, width // 2, y_cursor, line_words, headline_font,
+                            (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words,
+                            stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
+            y_cursor += line_height
 
         # مقبض العلامة التجارية أسفل اللوحة، بمسافة ديناميكية بعد آخر سطر بالعنوان (مع سقف يمنعه يتجاوز حدود الصورة)
         handle_font = _load_latin_font(handle_font_size)
