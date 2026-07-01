@@ -7,6 +7,7 @@ import ctypes
 import ctypes.util
 import random
 import base64
+import urllib.parse
 from io import BytesIO
 from threading import Thread
 
@@ -342,7 +343,7 @@ def generate_arabic_content(story):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": text_prompt}],
             temperature=0.9,
         )
@@ -382,7 +383,7 @@ def build_image_prompt(story, topic_summary):
     summary = clean_html(story["summary"])
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
@@ -538,6 +539,23 @@ def apply_brand_template(image_path, headline, highlight):
         print(f"WARNING: could not apply brand template to image (continuing without it): {str(e)[:200]}")
 
 
+def _generate_image_pollinations(prompt):
+    """توليد صورة مجاني بالكامل (بدون مفتاح API) عبر Pollinations.ai، كخيار أول لتقليل تكلفة OpenAI."""
+    print("Generating cover image (pollinations.ai, free)...")
+    try:
+        encoded_prompt = urllib.parse.quote(prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        params = {"width": 1024, "height": 1536, "nologo": "true"}
+        resp = requests.get(url, params=params, timeout=90)
+        resp.raise_for_status()
+        if not resp.content or len(resp.content) < 1000:
+            raise ValueError("empty or too-small response")
+        return resp.content
+    except Exception as e:
+        print(f"WARNING: pollinations.ai failed ({str(e)[:150]}), falling back to OpenAI image models...")
+        return None
+
+
 def generate_cover_image(story, topic_summary, headline, highlight):
     print("Building a safe, story-relevant image prompt...")
     try:
@@ -545,6 +563,13 @@ def generate_cover_image(story, topic_summary, headline, highlight):
     except Exception as e:
         print(f"ERROR building image prompt: {e}")
         return False
+
+    img_data = _generate_image_pollinations(image_prompt)
+    if img_data:
+        with open(TEMP_IMAGE, "wb") as handler:
+            handler.write(img_data)
+        apply_brand_template(TEMP_IMAGE, headline, highlight)
+        return True
 
     print("Generating cover image (dall-e-3)...")
     try:
