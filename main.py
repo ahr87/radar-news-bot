@@ -4,7 +4,6 @@ import json
 import time
 import random
 import base64
-import shutil
 import subprocess
 from threading import Thread
 
@@ -15,33 +14,30 @@ import schedule
 from bidi.algorithm import get_display
 from flask import Flask
 from openai import OpenAI
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 
 # --- المفاتيح من بيئة ريبليت ---
 ACCESS_TOKEN = os.environ.get('IG_ACCESS_TOKEN')
 INSTAGRAM_ACCOUNT_ID = os.environ.get('IG_ACCOUNT_ID')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-# اختياريان: إذا تم ضبطهما، يُستخدم صوت ElevenLabs الواقعي بدل صوت OpenAI
-ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
-ELEVENLABS_VOICE_ID = os.environ.get('ELEVENLABS_VOICE_ID')
 
 SEEN_FILE = "seen_stories.json"
 TEMP_IMAGE = "temp_image.jpg"
-TEMP_AUDIO = "temp_audio.mp3"
-TEMP_BASE_VIDEO = "base_reel.mp4"
 TEMP_VIDEO = "output_reel.mp4"
-CAPTION_DIR = "captions_tmp"
 
 VIDEO_WIDTH = 1024
 VIDEO_HEIGHT = 1792
+REEL_DURATION_SECONDS = 8
 
 # قالب العلامة التجارية الثابت (يُطبَّق برمجياً على كل صورة، بدل الاعتماد فقط على طلب GPT)
 BRAND_NAME = "RADAR NEWS"
 BRAND_ACCENT_COLOR = (255, 196, 60)
 BRAND_FRAME_WIDTH = 14
+BADGE_TEXT = "حقيقة نادرة"
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music")
 BRAND_FONT_PATH = os.path.join(ASSETS_DIR, "LiberationSans-Bold.ttf")
-CAPTION_FONT_PATH = os.path.join(ASSETS_DIR, "NotoNaskhArabic-Bold.ttf")
+HEADLINE_FONT_PATH = os.path.join(ASSETS_DIR, "NotoKufiArabic-Bold.ttf")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
@@ -79,10 +75,10 @@ RSS_FEEDS = [
 
 # هوية بصرية ثابتة تُضاف لكل صورة غلاف، عشان يكون فيه "تيمبلت" مرئي موحّد يميّز صفحة "رادار نيوز"
 BRAND_VISUAL_STYLE = (
-    "signature visual identity: vibrant electric-blue and warm gold color palette, "
-    "bright glowing highlights, rich saturated colors, high contrast, well-lit scene "
-    "(never dark, dim, muddy, or low-key), energetic dreamlike surreal digital-art style, "
-    "consistent with an eye-catching curiosity/discovery brand"
+    "signature visual identity: moody, atmospheric dark background (deep navy/black) with vivid glowing "
+    "neon-blue, purple, and gold accent lighting, rich saturated colors, high contrast, cinematic depth "
+    "(never muddy, flat, or desaturated), energetic dreamlike surreal digital-art style, "
+    "consistent with a premium mystery/curiosity discovery brand"
 )
 
 
@@ -116,18 +112,44 @@ def _shape_arabic_fallback(text):
     return get_display(arabic_reshaper.reshape(text))
 
 
+def _basic_layout_font(font):
+    """يعيد تحميل نفس الخط بمحرك تخطيط أساسي، لمنع raqm (إن وُجد) من إعادة تشكيل نص مُشكَّل مسبقاً."""
+    try:
+        return ImageFont.truetype(font.path, font.size, layout_engine=ImageFont.Layout.BASIC)
+    except Exception:
+        return font
+
+
 def _arabic_textbbox(draw, text, font):
     try:
         return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
     except Exception:
-        return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=font)
+        return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_basic_layout_font(font))
 
 
-def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center"):
+def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", stroke_width=0, stroke_fill=None):
     try:
-        draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align)
+        draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align,
+                   stroke_width=stroke_width, stroke_fill=stroke_fill)
     except Exception:
-        draw.text(xy, _shape_arabic_fallback(text), font=font, fill=fill, anchor=anchor, align=align)
+        draw.text(xy, _shape_arabic_fallback(text), font=_basic_layout_font(font), fill=fill, anchor=anchor,
+                   align=align, stroke_width=stroke_width, stroke_fill=stroke_fill)
+
+
+def _wrap_arabic_text(draw, text, font, max_width):
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        bbox = _arabic_textbbox(draw, candidate, font)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
 
 
 def clean_html(text):
@@ -194,7 +216,7 @@ def pick_story(all_stories, seen_ids):
     return random.choice(unseen)
 
 
-# --- توليد المحتوى العربي (كابشن + سيناريو صوتي) بالاعتماد على خبر حقيقي ---
+# --- توليد المحتوى العربي (عنوان الصورة + كابشن) بالاعتماد على خبر حقيقي ---
 def _extract_field(full_text, field_name):
     for line in full_text.split('\n'):
         if line.strip().startswith(field_name):
@@ -203,13 +225,13 @@ def _extract_field(full_text, field_name):
 
 
 def generate_arabic_content(story):
-    print("Writing Arabic script based on the story...")
+    print("Writing Arabic content based on the story...")
     title = clean_html(story["title"])
     summary = clean_html(story["summary"])
     source = story["source"]
 
     text_prompt = f"""
-    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بصناعة ريلز عربية فضولية شديدة الجذب مبنية على أخبار حقيقية، بهدف الوصول لصفحة الاكتشاف (الإكسبلور).
+    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بصناعة منشورات عربية فضولية شديدة الجذب مبنية على أخبار حقيقية، بهدف الوصول لصفحة الاكتشاف (الإكسبلور).
 
     هذا خبر حقيقي من مصدر موثوق:
     العنوان: {title}
@@ -219,14 +241,14 @@ def generate_arabic_content(story):
     القواعد المهمة:
     1. اعتمد فقط على المعلومات الموجودة فعلاً بالخبر أعلاه، ولا تخترع أي حقيقة غير موجودة فيه.
     2. لا تُعِد صياغة العنوان الرئيسي المعروف للخبر. ابحث داخل الملخص عن أغرب وأندر تفصيل موجود فيه (رقم صادم، سبب غير متوقع، تفصيل جانبي قليل من ينتبه له)، واجعله محور المحتوى بدل الفكرة العامة المتوقعة.
-    3. اكتب "فجوة فضول" حقيقية بالخطاف: ابدأ بسؤال أو جملة تخلق تشويقاً وتؤجل الكشف عن الإجابة/المفارقة لبعد سطر أو سطرين، بحيث يضطر القارئ يكمل القراءة أو المشاهدة عشان يعرف الجواب.
+    3. العنوان المصوّر يجب أن يكون قصيراً جداً (3 إلى 6 كلمات فقط) وصادماً/فضولياً، لأنه سيُكتب بخط كبير مباشرة على الصورة، ويجب أن يُفهم المعنى الأساسي منه وحده بدون أي نص آخر. لا تستخدم علامة التعجب "!" إطلاقاً.
     4. اختم بسؤال حقيقي يحفّز الناس يكتبون تعليق (مو مجرد "شنو رأيك" عام، خليه سؤال مرتبط تحديداً بتفصيل الخبر).
-    5. اكتب بالعربية الفصحى المبسطة والسليمة 100% (لتجنب أخطاء نطق الراوي الآلي، بدون كلمات إنجليزية أو رموز يصعب نطقها).
+    5. اكتب بالعربية الفصحى المبسطة والسليمة 100%، بدون كلمات إنجليزية.
 
     استخدم هذا التنسيق بالضبط في ردك (بدون أي نص إضافي خارج هذا التنسيق):
     الملخص: (كلمتين إلى ثلاث كلمات تلخص المشهد البصري الأنسب للتفصيل النادر، لتوليد صورة عنه)
-    الصوت: (سيناريو تعليق صوتي بحدود 40 إلى 55 كلمة: خطاف قوي بفجوة فضول + كشف تدريجي للتفصيل النادر)
-    الخطاف: (أول جملة بالمنشور، مطابقة لروح سيناريو الصوت، سؤال أو جملة صادمة قصيرة)
+    العنوان: (3 إلى 6 كلمات فقط، يُكتب بخط كبير على الصورة، بدون علامة تعجب)
+    الخطاف: (أول جملة بالمنشور، سؤال أو جملة صادمة قصيرة)
     الجسم: (3 إلى 4 جمل تكشف التفصيل النادر تدريجياً بأسلوب قصصي شيق)
     السؤال الختامي: (سؤال قصير مرتبط تحديداً بالخبر يحفّز التعليقات)
     الهاشتاقات: (8 إلى 10 هاشتاقات عربية وإنجليزية مرتبطة تحديداً بموضوع الخبر، بدون هاشتاقات عامة مكررة)
@@ -241,8 +263,8 @@ def generate_arabic_content(story):
         full_text = response.choices[0].message.content.strip()
 
         topic_summary = _extract_field(full_text, "الملخص") or title
-        voice_script = _extract_field(full_text, "الصوت") or f"هل تعلم أن {title}؟"
-        hook = _extract_field(full_text, "الخطاف") or topic_summary
+        headline = _extract_field(full_text, "العنوان") or title
+        hook = _extract_field(full_text, "الخطاف") or headline
         body = _extract_field(full_text, "الجسم") or summary[:300]
         closing_question = _extract_field(full_text, "السؤال الختامي") or "شنو رأيكم؟ 👇"
         hashtags = _extract_field(full_text, "الهاشتاقات") or "#رادار_نيوز #RadarNews"
@@ -256,8 +278,8 @@ def generate_arabic_content(story):
             f"{hashtags} #رادار_نيوز #RadarNews"
         )
 
-        print(f"Script written: {topic_summary}")
-        return topic_summary, voice_script, caption
+        print(f"Content written: {headline}")
+        return topic_summary, headline, caption
     except Exception as e:
         print(f"ERROR generating content: {e}")
         return None, None, None
@@ -294,13 +316,13 @@ def build_image_prompt(story, topic_summary):
                     f"Requirements:\n"
                     f"- Highly conceptual, surreal, cinematic illustration\n"
                     f"- Vertical composition (9:16)\n"
+                    f"- Leave the upper-middle third of the frame relatively uncluttered (simple sky/background there), "
+                    f"since bold headline text will be overlaid there afterward\n"
                     f"- ABSOLUTELY NO text, letters, numbers, symbols, signage, or writing anywhere in the image, "
                     f"in any language — this is critical, image models often render garbled text so avoid it entirely\n"
                     f"- Do NOT represent abstract ideas (math, science, data, language, time) using floating digits, "
                     f"equations, glyphs, or symbol clusters, even as decorative or stylized elements — express the "
                     f"concept only through concrete objects, creatures, scenery, colors, and lighting\n"
-                    f"- Prefer a well-lit, glowing, or sunlit setting; avoid deep darkness, black voids, or dim night "
-                    f"scenes unless absolutely essential to the concept\n"
                     f"- Masterpiece quality, highly detailed, cinematic lighting\n"
                     f"- No real people, no logos, no copyrighted elements\n"
                     f"- Apply this {BRAND_VISUAL_STYLE}\n"
@@ -315,7 +337,7 @@ def build_image_prompt(story, topic_summary):
     return response.choices[0].message.content.strip()
 
 
-def _save_generated_image(image_response):
+def _save_generated_image(image_response, headline):
     data = image_response.data[0]
     if getattr(data, "url", None):
         img_data = requests.get(data.url).content
@@ -323,57 +345,88 @@ def _save_generated_image(image_response):
         img_data = base64.b64decode(data.b64_json)
     with open(TEMP_IMAGE, "wb") as handler:
         handler.write(img_data)
-    apply_brand_template(TEMP_IMAGE)
+    apply_brand_template(TEMP_IMAGE, headline)
 
 
-def apply_brand_template(image_path):
-    """يطبّق هوية بصرية ثابتة (تفتيح + إطار + شعار) على كل صورة، بغض النظر عن ناتج الذكاء الاصطناعي."""
+def _sanitize_headline(text):
+    return text.replace("!", "").replace("！", "").strip()
+
+
+def apply_brand_template(image_path, headline):
+    """يطبّق هوية بصرية ثابتة (تفتيح + عنوان كبير + شارة + إطار + شعار) على كل صورة."""
     try:
         img = Image.open(image_path).convert("RGB")
 
-        # تصحيح تلقائي للسطوع والتباين والتشبع، لتفادي الصور الداكنة/الباهتة بشكل مضمون
-        img = ImageEnhance.Brightness(img).enhance(1.15)
-        img = ImageEnhance.Contrast(img).enhance(1.10)
-        img = ImageEnhance.Color(img).enhance(1.25)
+        # تصحيح تلقائي للسطوع والتباين والتشبع لضمان ألوان حيوية غير باهتة
+        img = ImageEnhance.Brightness(img).enhance(1.05)
+        img = ImageEnhance.Contrast(img).enhance(1.12)
+        img = ImageEnhance.Color(img).enhance(1.2)
 
         img = img.convert("RGBA")
         width, height = img.size
+
+        # طبقة داكنة خفيفة فوق كامل الصورة لضمان وضوح النص أياً كانت خلفية الذكاء الاصطناعي
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 60))
+        img.alpha_composite(overlay)
+
+        draw = ImageDraw.Draw(img)
+
+        # شارة تصنيف أعلى الصورة
+        badge_font = ImageFont.truetype(HEADLINE_FONT_PATH, max(22, width // 34))
+        badge_h = int(width // 34 * 2.2)
+        bbox = _arabic_textbbox(draw, BADGE_TEXT, badge_font)
+        bw = bbox[2] - bbox[0]
+        pad = 26
+        bx0 = width // 2 - bw // 2 - pad
+        bx1 = width // 2 + bw // 2 + pad
+        by0 = int(height * 0.055)
+        by1 = by0 + badge_h
+        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=(by1 - by0) // 2,
+                                outline=BRAND_ACCENT_COLOR + (255,), width=3, fill=(15, 12, 10, 160))
+        _draw_arabic_text(draw, ((bx0 + bx1) // 2, (by0 + by1) // 2), BADGE_TEXT, badge_font,
+                           BRAND_ACCENT_COLOR + (255,), anchor="mm")
+
+        # العنوان الكبير المكتوب مباشرة على الصورة (المعلومة الأساسية للمشاهد الصامت)
+        headline_text = _sanitize_headline(headline)
+        headline_font = ImageFont.truetype(HEADLINE_FONT_PATH, max(50, width // 11))
+        max_text_width = int(width * 0.86)
+        lines = _wrap_arabic_text(draw, headline_text, headline_font, max_text_width)
+
+        line_height = int(width // 11 * 1.25)
+        total_height = line_height * len(lines)
+        y_cursor = int(height * 0.30) - total_height // 2
+        stroke_w = max(2, width // 250)
+        for line in lines:
+            _draw_arabic_text(draw, (width // 2, y_cursor), line, headline_font, (255, 255, 255, 255),
+                               anchor="ma", align="center", stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
+            y_cursor += line_height
 
         # تدرّج داكن أسفل الصورة لوضوح الشعار
         gradient_height = int(height * 0.20)
         gradient = Image.new("RGBA", (width, gradient_height), (0, 0, 0, 0))
         gradient_draw = ImageDraw.Draw(gradient)
         for y in range(gradient_height):
-            alpha = int(180 * (y / gradient_height))
+            alpha = int(190 * (y / gradient_height))
             gradient_draw.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
         img.alpha_composite(gradient, (0, height - gradient_height))
 
         draw = ImageDraw.Draw(img)
 
         # إطار ثابت بلون العلامة التجارية يميّز شكل منشورات الصفحة
-        draw.rectangle(
-            [0, 0, width - 1, height - 1],
-            outline=BRAND_ACCENT_COLOR + (255,),
-            width=BRAND_FRAME_WIDTH,
-        )
+        draw.rectangle([0, 0, width - 1, height - 1], outline=BRAND_ACCENT_COLOR + (255,), width=BRAND_FRAME_WIDTH)
 
         # شعار نصي إنكليزي ثابت (باللاتيني عمداً لتفادي تشوّه الحروف العربية بالصور)
-        font_size = max(30, width // 16)
-        font = ImageFont.truetype(BRAND_FONT_PATH, font_size)
+        wordmark_size = max(30, width // 16)
+        wordmark_font = ImageFont.truetype(BRAND_FONT_PATH, wordmark_size)
         margin = BRAND_FRAME_WIDTH + 26
-        draw.text(
-            (margin, height - margin - font_size),
-            BRAND_NAME,
-            font=font,
-            fill=(255, 255, 255, 255),
-        )
+        draw.text((margin, height - margin - wordmark_size), BRAND_NAME, font=wordmark_font, fill=(255, 255, 255, 255))
 
         img.convert("RGB").save(image_path, "JPEG", quality=95)
     except Exception as e:
         print(f"WARNING: could not apply brand template to image (continuing without it): {str(e)[:200]}")
 
 
-def generate_cover_image(story, topic_summary):
+def generate_cover_image(story, topic_summary, headline):
     print("Building a safe image prompt...")
     try:
         image_prompt = build_image_prompt(story, topic_summary)
@@ -390,7 +443,7 @@ def generate_cover_image(story, topic_summary):
             quality="hd",
             n=1,
         )
-        _save_generated_image(image_response)
+        _save_generated_image(image_response, headline)
         return True
     except Exception as e:
         error_msg = str(e)
@@ -407,7 +460,7 @@ def generate_cover_image(story, topic_summary):
             quality="high",
             n=1,
         )
-        _save_generated_image(image_response)
+        _save_generated_image(image_response, headline)
         return True
     except Exception as e:
         error_msg = str(e)
@@ -418,203 +471,43 @@ def generate_cover_image(story, topic_summary):
         return False
 
 
-def _generate_voice_elevenlabs(text):
-    try:
-        response = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-            headers={
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
-            },
-            json={
-                "text": text,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.8,
-                    "style": 0.4,
-                    "use_speaker_boost": True,
-                },
-            },
-            timeout=60,
-        )
-        if response.status_code == 200 and response.content:
-            with open(TEMP_AUDIO, "wb") as f:
-                f.write(response.content)
-            return True
-        print(f"WARNING: ElevenLabs failed (HTTP {response.status_code}): {response.text[:200]}")
-        return False
-    except Exception as e:
-        print(f"WARNING: error connecting to ElevenLabs: {str(e)[:200]}")
-        return False
+def _pick_music_track():
+    if not os.path.isdir(MUSIC_DIR):
+        return None
+    tracks = [f for f in os.listdir(MUSIC_DIR) if f.lower().endswith((".mp3", ".m4a", ".wav"))]
+    if not tracks:
+        return None
+    return os.path.join(MUSIC_DIR, random.choice(tracks))
 
 
-def generate_voice_over(text):
-    if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
-        print("Generating realistic voice via ElevenLabs...")
-        if _generate_voice_elevenlabs(text):
-            return True
-        print("WARNING: falling back to OpenAI voice...")
-
-    print("Generating narrator voice (OpenAI)...")
-    try:
-        response = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="coral",
-            input=text,
-            instructions=(
-                "تحدث بالعربية الفصحى المبسطة كراوٍ عربي محترف بأسلوب وثائقي دافئ وواثق ومشوّق، "
-                "بسرعة معتدلة، مع وقفات طبيعية قصيرة بين الجمل، ونبرة فضول تشد المستمع من أول كلمة، "
-                "بدون أي رتابة أو نبرة آلية."
-            ),
-        )
-        with open(TEMP_AUDIO, "wb") as f:
-            f.write(response.content)
-        return True
-    except Exception as e:
-        print(f"WARNING: gpt-4o-mini-tts unavailable ({str(e)[:150]}), trying tts-1-hd...")
+def create_video_reel():
+    print("Assembling video and motion effect...")
+    music_path = _pick_music_track()
+    if music_path:
+        print(f"Using background music: {os.path.basename(music_path)}")
+        audio_inputs = ["-stream_loop", "-1", "-i", music_path]
+        audio_filter = ["-af", f"afade=t=out:st={REEL_DURATION_SECONDS - 1}:d=1,volume=0.5"]
+    else:
+        print("NOTE: no background music found in assets/music/. Add royalty-free .mp3 tracks there for audio - publishing a silent video for now.")
+        audio_inputs = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+        audio_filter = []
 
     try:
-        response = client.audio.speech.create(
-            model="tts-1-hd",
-            voice="onyx",
-            input=text,
-        )
-        with open(TEMP_AUDIO, "wb") as f:
-            f.write(response.content)
-        return True
-    except Exception as e:
-        print(f"ERROR generating voice: {str(e)[:200]}")
-        return False
-
-
-def _transcribe_word_timestamps():
-    with open(TEMP_AUDIO, "rb") as f:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            language="ar",
-            response_format="verbose_json",
-            timestamp_granularities=["word"],
-        )
-    return [{"word": w.word, "start": w.start, "end": w.end} for w in (transcript.words or [])]
-
-
-def _group_words_into_chunks(words, words_per_chunk=3):
-    chunks = []
-    for i in range(0, len(words), words_per_chunk):
-        group = words[i:i + words_per_chunk]
-        if not group:
-            continue
-        text = " ".join(w["word"].strip() for w in group)
-        chunks.append({"text": text, "start": group[0]["start"], "end": group[-1]["end"]})
-    return chunks
-
-
-def _render_caption_image(text):
-    band_height = 340
-    img = Image.new("RGBA", (VIDEO_WIDTH, band_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(CAPTION_FONT_PATH, 62)
-
-    bbox = _arabic_textbbox(draw, text, font)
-    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pad_x, pad_y = 40, 24
-    box_w = min(VIDEO_WIDTH - 60, text_w + pad_x * 2)
-    box_x0 = (VIDEO_WIDTH - box_w) // 2
-    box_y0 = (band_height - text_h) // 2 - pad_y
-    box_y1 = box_y0 + text_h + pad_y * 2
-
-    draw.rounded_rectangle([box_x0, box_y0, box_x0 + box_w, box_y1], radius=20, fill=(0, 0, 0, 165))
-    _draw_arabic_text(
-        draw,
-        (VIDEO_WIDTH // 2, (box_y0 + box_y1) // 2),
-        text,
-        font=font,
-        fill=(255, 255, 255, 255),
-        anchor="mm",
-        align="center",
-    )
-    return img
-
-
-def _burn_captions(base_video_path):
-    """يحرق ترجمة عربية متزامنة مع الصوت داخل الفيديو (لأن أغلب المشاهدين يتفرجون بدون صوت)."""
-    try:
-        words = _transcribe_word_timestamps()
-        if not words:
-            print("WARNING: could not extract word timing, publishing without captions.")
-            return False
-
-        chunks = _group_words_into_chunks(words, words_per_chunk=3)
-        if not chunks:
-            return False
-
-        os.makedirs(CAPTION_DIR, exist_ok=True)
-        caption_paths = []
-        for idx, chunk in enumerate(chunks):
-            img = _render_caption_image(chunk["text"])
-            path = os.path.join(CAPTION_DIR, f"caption_{idx}.png")
-            img.save(path)
-            caption_paths.append((path, chunk["start"], chunk["end"]))
-
-        inputs = ["-i", base_video_path]
-        for path, _, _ in caption_paths:
-            inputs += ["-i", path]
-
-        caption_y = int(VIDEO_HEIGHT * 0.66)
-        filter_parts = []
-        last_label = "0:v"
-        for i, (_, start, end) in enumerate(caption_paths):
-            out_label = f"v{i + 1}"
-            filter_parts.append(
-                f"[{last_label}][{i + 1}:v]overlay=x=0:y={caption_y}:"
-                f"enable='between(t,{start:.2f},{end:.2f})'[{out_label}]"
-            )
-            last_label = out_label
-
         command = [
             "ffmpeg", "-y",
-            *inputs,
-            "-filter_complex", ";".join(filter_parts),
-            "-map", f"[{last_label}]",
-            "-map", "0:a",
-            "-c:v", "libx264", "-c:a", "copy",
-            "-pix_fmt", "yuv420p",
+            "-loop", "1", "-framerate", "30", "-i", TEMP_IMAGE,
+            *audio_inputs,
+            "-vf", f"zoompan=z='min(zoom+0.0007,1.2)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d={REEL_DURATION_SECONDS * 30}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps=30",
+            *audio_filter,
+            "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k",
+            "-pix_fmt", "yuv420p", "-t", str(REEL_DURATION_SECONDS),
             TEMP_VIDEO,
         ]
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
     except Exception as e:
-        print(f"WARNING: could not burn captions into video (publishing without them): {str(e)[:200]}")
-        return False
-    finally:
-        shutil.rmtree(CAPTION_DIR, ignore_errors=True)
-
-
-def create_video_reel():
-    print("Assembling video and motion effect...")
-    try:
-        command = [
-            "ffmpeg", "-y", "-loop", "1", "-framerate", "30", "-i", TEMP_IMAGE, "-i", TEMP_AUDIO,
-            "-vf", f"zoompan=z='min(zoom+0.0005,1.15)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1500:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps=30",
-            "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p", "-shortest", TEMP_BASE_VIDEO,
-        ]
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    except Exception as e:
         print(f"ERROR assembling video: {e}")
         return False
-
-    print("Adding synced Arabic captions...")
-    if not _burn_captions(TEMP_BASE_VIDEO):
-        os.replace(TEMP_BASE_VIDEO, TEMP_VIDEO)
-        return True
-
-    if os.path.exists(TEMP_BASE_VIDEO):
-        os.remove(TEMP_BASE_VIDEO)
-    return True
 
 
 def upload_to_temp_server():
@@ -659,14 +552,13 @@ def post_reel_to_instagram(video_url, caption):
 
 
 def cleanup_temp_files():
-    for path in (TEMP_IMAGE, TEMP_AUDIO, TEMP_BASE_VIDEO, TEMP_VIDEO):
+    for path in (TEMP_IMAGE, TEMP_VIDEO):
         if os.path.exists(path):
             os.remove(path)
-    shutil.rmtree(CAPTION_DIR, ignore_errors=True)
 
 
 def job():
-    """دورة الإنتاج الآلية: جلب خبر حقيقي -> محتوى عربي -> صورة -> صوت -> فيديو -> نشر"""
+    """دورة الإنتاج الآلية: جلب خبر حقيقي -> محتوى عربي -> صورة بعنوان مكتوب -> فيديو بموسيقى -> نشر"""
     print("Scheduled run starting: beginning production cycle...")
 
     seen_ids = load_seen_stories()
@@ -684,18 +576,13 @@ def job():
 
     print(f"Selected story: {story['title']} ({story['source']})")
 
-    topic_summary, voice_script, caption = generate_arabic_content(story)
-    if not (topic_summary and voice_script and caption):
+    topic_summary, headline, caption = generate_arabic_content(story)
+    if not (topic_summary and headline and caption):
         print("ERROR: failed to generate Arabic content. Cancelling cycle.")
         return
 
-    if not generate_cover_image(story, topic_summary):
+    if not generate_cover_image(story, topic_summary, headline):
         print("ERROR: failed to generate image. Cancelling cycle.")
-        return
-
-    if not generate_voice_over(voice_script):
-        print("ERROR: failed to generate voice. Cancelling cycle.")
-        cleanup_temp_files()
         return
 
     if not create_video_reel():
