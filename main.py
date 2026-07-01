@@ -4,6 +4,7 @@ import json
 import time
 import random
 import base64
+import shutil
 import subprocess
 from threading import Thread
 
@@ -25,13 +26,20 @@ ELEVENLABS_VOICE_ID = os.environ.get('ELEVENLABS_VOICE_ID')
 SEEN_FILE = "seen_stories.json"
 TEMP_IMAGE = "temp_image.jpg"
 TEMP_AUDIO = "temp_audio.mp3"
+TEMP_BASE_VIDEO = "base_reel.mp4"
 TEMP_VIDEO = "output_reel.mp4"
+CAPTION_DIR = "captions_tmp"
+
+VIDEO_WIDTH = 1024
+VIDEO_HEIGHT = 1792
 
 # قالب العلامة التجارية الثابت (يُطبَّق برمجياً على كل صورة، بدل الاعتماد فقط على طلب GPT)
 BRAND_NAME = "RADAR NEWS"
 BRAND_ACCENT_COLOR = (255, 196, 60)
 BRAND_FRAME_WIDTH = 14
-BRAND_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts", "LiberationSans-Bold.ttf")
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+BRAND_FONT_PATH = os.path.join(ASSETS_DIR, "LiberationSans-Bold.ttf")
+CAPTION_FONT_PATH = os.path.join(ASSETS_DIR, "NotoNaskhArabic-Bold.ttf")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
@@ -460,20 +468,133 @@ def generate_voice_over(text):
         return False
 
 
+def _transcribe_word_timestamps():
+    with open(TEMP_AUDIO, "rb") as f:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            language="ar",
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
+        )
+    return [{"word": w.word, "start": w.start, "end": w.end} for w in (transcript.words or [])]
+
+
+def _group_words_into_chunks(words, words_per_chunk=3):
+    chunks = []
+    for i in range(0, len(words), words_per_chunk):
+        group = words[i:i + words_per_chunk]
+        if not group:
+            continue
+        text = " ".join(w["word"].strip() for w in group)
+        chunks.append({"text": text, "start": group[0]["start"], "end": group[-1]["end"]})
+    return chunks
+
+
+def _render_caption_image(text):
+    band_height = 340
+    img = Image.new("RGBA", (VIDEO_WIDTH, band_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(CAPTION_FONT_PATH, 62)
+
+    bbox = draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pad_x, pad_y = 40, 24
+    box_w = min(VIDEO_WIDTH - 60, text_w + pad_x * 2)
+    box_x0 = (VIDEO_WIDTH - box_w) // 2
+    box_y0 = (band_height - text_h) // 2 - pad_y
+    box_y1 = box_y0 + text_h + pad_y * 2
+
+    draw.rounded_rectangle([box_x0, box_y0, box_x0 + box_w, box_y1], radius=20, fill=(0, 0, 0, 165))
+    draw.text(
+        (VIDEO_WIDTH // 2, (box_y0 + box_y1) // 2),
+        text,
+        font=font,
+        fill=(255, 255, 255, 255),
+        direction="rtl",
+        language="ar",
+        anchor="mm",
+        align="center",
+    )
+    return img
+
+
+def _burn_captions(base_video_path):
+    """يحرق ترجمة عربية متزامنة مع الصوت داخل الفيديو (لأن أغلب المشاهدين يتفرجون بدون صوت)."""
+    try:
+        words = _transcribe_word_timestamps()
+        if not words:
+            print("⚠️ لم يتم استخراج توقيت للكلمات، سيُنشر الفيديو بدون ترجمة.")
+            return False
+
+        chunks = _group_words_into_chunks(words, words_per_chunk=3)
+        if not chunks:
+            return False
+
+        os.makedirs(CAPTION_DIR, exist_ok=True)
+        caption_paths = []
+        for idx, chunk in enumerate(chunks):
+            img = _render_caption_image(chunk["text"])
+            path = os.path.join(CAPTION_DIR, f"caption_{idx}.png")
+            img.save(path)
+            caption_paths.append((path, chunk["start"], chunk["end"]))
+
+        inputs = ["-i", base_video_path]
+        for path, _, _ in caption_paths:
+            inputs += ["-i", path]
+
+        caption_y = int(VIDEO_HEIGHT * 0.66)
+        filter_parts = []
+        last_label = "0:v"
+        for i, (_, start, end) in enumerate(caption_paths):
+            out_label = f"v{i + 1}"
+            filter_parts.append(
+                f"[{last_label}][{i + 1}:v]overlay=x=0:y={caption_y}:"
+                f"enable='between(t,{start:.2f},{end:.2f})'[{out_label}]"
+            )
+            last_label = out_label
+
+        command = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", ";".join(filter_parts),
+            "-map", f"[{last_label}]",
+            "-map", "0:a",
+            "-c:v", "libx264", "-c:a", "copy",
+            "-pix_fmt", "yuv420p",
+            TEMP_VIDEO,
+        ]
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return True
+    except Exception as e:
+        print(f"⚠️ تعذر حرق الترجمة بالفيديو (سيُنشر بدونها): {str(e)[:200]}")
+        return False
+    finally:
+        shutil.rmtree(CAPTION_DIR, ignore_errors=True)
+
+
 def create_video_reel():
     print("🎬 جاري المونتاج وإضافة الحركة البصرية...")
     try:
         command = [
             "ffmpeg", "-y", "-loop", "1", "-framerate", "30", "-i", TEMP_IMAGE, "-i", TEMP_AUDIO,
-            "-vf", "zoompan=z='min(zoom+0.0005,1.15)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1500:s=1024x1792:fps=30",
+            "-vf", f"zoompan=z='min(zoom+0.0005,1.15)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1500:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps=30",
             "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p", "-shortest", TEMP_VIDEO,
+            "-pix_fmt", "yuv420p", "-shortest", TEMP_BASE_VIDEO,
         ]
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        return True
     except Exception as e:
         print(f"❌ خطأ في المونتاج: {e}")
         return False
+
+    print("💬 جاري إضافة ترجمة عربية متزامنة مع الصوت...")
+    if not _burn_captions(TEMP_BASE_VIDEO):
+        os.replace(TEMP_BASE_VIDEO, TEMP_VIDEO)
+        return True
+
+    if os.path.exists(TEMP_BASE_VIDEO):
+        os.remove(TEMP_BASE_VIDEO)
+    return True
 
 
 def upload_to_temp_server():
@@ -518,9 +639,10 @@ def post_reel_to_instagram(video_url, caption):
 
 
 def cleanup_temp_files():
-    for path in (TEMP_IMAGE, TEMP_AUDIO, TEMP_VIDEO):
+    for path in (TEMP_IMAGE, TEMP_AUDIO, TEMP_BASE_VIDEO, TEMP_VIDEO):
         if os.path.exists(path):
             os.remove(path)
+    shutil.rmtree(CAPTION_DIR, ignore_errors=True)
 
 
 def job():
