@@ -33,7 +33,7 @@ REEL_DURATION_SECONDS = 8
 BRAND_NAME = "RADAR NEWS"
 BRAND_ACCENT_COLOR = (255, 196, 60)
 BRAND_FRAME_WIDTH = 14
-BADGE_TEXT = "حقيقة نادرة"
+BADGE_TEXT = "أخبار تقنية"
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
 MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music")
 BRAND_FONT_PATH = os.path.join(ASSETS_DIR, "LiberationSans-Bold.ttf")
@@ -44,32 +44,32 @@ app = Flask(__name__)
 
 RSS_FEEDS = [
     {
-        "name": "Atlas Obscura",
-        "url": "https://www.atlasobscura.com/feeds/latest",
+        "name": "TechCrunch",
+        "url": "https://techcrunch.com/feed/",
     },
     {
-        "name": "Science Daily - Strange & Offbeat",
-        "url": "https://www.sciencedaily.com/rss/strange_offbeat.xml",
+        "name": "The Verge",
+        "url": "https://www.theverge.com/rss/index.xml",
     },
     {
-        "name": "New Scientist",
-        "url": "https://www.newscientist.com/feed/home/",
+        "name": "Ars Technica",
+        "url": "https://feeds.arstechnica.com/arstechnica/index",
     },
     {
-        "name": "IFLScience",
-        "url": "https://www.iflscience.com/rss",
+        "name": "Wired",
+        "url": "https://www.wired.com/feed/rss",
     },
     {
-        "name": "Live Science",
-        "url": "https://www.livescience.com/feeds/all",
+        "name": "Engadget",
+        "url": "https://www.engadget.com/rss.xml",
     },
     {
-        "name": "Smithsonian Magazine - Smart News",
-        "url": "https://www.smithsonianmag.com/rss/smart-news/",
+        "name": "VentureBeat AI",
+        "url": "https://venturebeat.com/category/ai/feed/",
     },
     {
-        "name": "Ancient Origins",
-        "url": "https://www.ancient-origins.net/rss.xml",
+        "name": "IGN",
+        "url": "https://feeds.ign.com/ign/all",
     },
 ]
 
@@ -77,8 +77,8 @@ RSS_FEEDS = [
 BRAND_VISUAL_STYLE = (
     "signature visual identity: moody, atmospheric dark background (deep navy/black) with vivid glowing "
     "neon-blue, purple, and gold accent lighting, rich saturated colors, high contrast, cinematic depth "
-    "(never muddy, flat, or desaturated), energetic dreamlike surreal digital-art style, "
-    "consistent with a premium mystery/curiosity discovery brand"
+    "(never muddy, flat, or desaturated), futuristic tech/AI-inspired digital-art style, "
+    "consistent with a premium technology news brand"
 )
 
 
@@ -120,18 +120,54 @@ def _basic_layout_font(font):
         return font
 
 
-def _arabic_textbbox(draw, text, font):
+_ARABIC_FONT_HEALTHY = None
+
+
+def _arabic_font_healthy(font_path):
+    """يتحقق فعلياً (لا يفترض فقط) أن الخط يرسم حرفاً عربياً حقيقياً، لأن raqm أحياناً يفشل بصمت بدون استثناء."""
+    global _ARABIC_FONT_HEALTHY
+    if _ARABIC_FONT_HEALTHY is not None:
+        return _ARABIC_FONT_HEALTHY
     try:
-        return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+        test_font = ImageFont.truetype(font_path, 60, layout_engine=ImageFont.Layout.BASIC)
+        test_img = Image.new("L", (120, 80), 0)
+        test_draw = ImageDraw.Draw(test_img)
+        test_draw.text((10, 10), _shape_arabic_fallback("الف"), font=test_font, fill=255)
+        _ARABIC_FONT_HEALTHY = test_img.getbbox() is not None
+        if not _ARABIC_FONT_HEALTHY:
+            print(f"ERROR: Arabic font at {font_path} produced no visible glyphs (likely a corrupted/unreadable font file).")
+    except Exception as e:
+        _ARABIC_FONT_HEALTHY = False
+        print(f"ERROR: could not load Arabic font at {font_path}: {str(e)[:200]}")
+    return _ARABIC_FONT_HEALTHY
+
+
+def _raqm_renders_correctly(draw, font):
+    """يتحقق أن raqm (إن وُجد) ينتج فعلاً رسماً صحيحاً، بدل الاعتماد على استثناء قد لا يُرفع."""
+    try:
+        bbox = draw.textbbox((0, 0), "الف", font=font, direction="rtl", language="ar")
+        return bool(bbox) and (bbox[2] - bbox[0]) > 5
     except Exception:
-        return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_basic_layout_font(font))
+        return False
+
+
+def _arabic_textbbox(draw, text, font):
+    if not _arabic_font_healthy(getattr(font, "path", HEADLINE_FONT_PATH)):
+        return draw.textbbox((0, 0), text, font=font)
+    if _raqm_renders_correctly(draw, font):
+        return draw.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+    return draw.textbbox((0, 0), _shape_arabic_fallback(text), font=_basic_layout_font(font))
 
 
 def _draw_arabic_text(draw, xy, text, font, fill, anchor=None, align="center", stroke_width=0, stroke_fill=None):
-    try:
+    if not _arabic_font_healthy(getattr(font, "path", HEADLINE_FONT_PATH)):
+        draw.text(xy, text, font=font, fill=fill, anchor=anchor, align=align,
+                   stroke_width=stroke_width, stroke_fill=stroke_fill)
+        return
+    if _raqm_renders_correctly(draw, font):
         draw.text(xy, text, font=font, fill=fill, direction="rtl", language="ar", anchor=anchor, align=align,
                    stroke_width=stroke_width, stroke_fill=stroke_fill)
-    except Exception:
+    else:
         draw.text(xy, _shape_arabic_fallback(text), font=_basic_layout_font(font), fill=fill, anchor=anchor,
                    align=align, stroke_width=stroke_width, stroke_fill=stroke_fill)
 
@@ -231,16 +267,16 @@ def generate_arabic_content(story):
     source = story["source"]
 
     text_prompt = f"""
-    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بصناعة منشورات عربية فضولية شديدة الجذب مبنية على أخبار حقيقية، بهدف الوصول لصفحة الاكتشاف (الإكسبلور).
+    أنت صانع محتوى محترف تدير حساب انستقرام عراقي اسمه "رادار نيوز"، متخصص بأخبار التقنية والذكاء الاصطناعي والألعاب والأحداث التكنولوجية المميزة، تحوّل الأخبار التقنية الحقيقية لمنشورات عربية فضولية شديدة الجذب، بهدف الوصول لصفحة الاكتشاف (الإكسبلور).
 
-    هذا خبر حقيقي من مصدر موثوق:
+    هذا خبر تقني حقيقي من مصدر موثوق:
     العنوان: {title}
     الملخص: {summary}
     المصدر: {source}
 
     القواعد المهمة:
     1. اعتمد فقط على المعلومات الموجودة فعلاً بالخبر أعلاه، ولا تخترع أي حقيقة غير موجودة فيه.
-    2. لا تُعِد صياغة العنوان الرئيسي المعروف للخبر. ابحث داخل الملخص عن أغرب وأندر تفصيل موجود فيه (رقم صادم، سبب غير متوقع، تفصيل جانبي قليل من ينتبه له)، واجعله محور المحتوى بدل الفكرة العامة المتوقعة.
+    2. لا تُعِد صياغة العنوان الرئيسي المعروف للخبر. ابحث داخل الملخص عن أغرب وأهم تفصيل تقني فيه (رقم صادم، قدرة جديدة غير متوقعة، تأثير مستقبلي)، واجعله محور المحتوى بدل الفكرة العامة المتوقعة.
     3. العنوان المصوّر يجب أن يكون قصيراً جداً (3 إلى 6 كلمات فقط) وصادماً/فضولياً، لأنه سيُكتب بخط كبير مباشرة على الصورة، ويجب أن يُفهم المعنى الأساسي منه وحده بدون أي نص آخر. لا تستخدم علامة التعجب "!" إطلاقاً.
     4. اختم بسؤال حقيقي يحفّز الناس يكتبون تعليق (مو مجرد "شنو رأيك" عام، خليه سؤال مرتبط تحديداً بتفصيل الخبر).
     5. اكتب بالعربية الفصحى المبسطة والسليمة 100%، بدون كلمات إنجليزية.
@@ -274,7 +310,7 @@ def generate_arabic_content(story):
             f"{hook}\n\n"
             f"{body}\n\n"
             f"💬 {closing_question}\n"
-            f"🔁 شير المنشور لصديق يحب الحقائق الغريبة\n\n"
+            f"🔁 شير المنشور لصديق مهووس بالتقنية\n\n"
             f"{hashtags} #رادار_نيوز #RadarNews"
         )
 
