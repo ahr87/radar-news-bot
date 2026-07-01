@@ -125,19 +125,33 @@ def _shape_arabic_fallback(text):
 _ARABIC_FONT_HEALTHY = None
 
 
+def _render_char_bytes(font, ch):
+    img = Image.new("L", (140, 100), 0)
+    draw = ImageDraw.Draw(img)
+    draw.text((10, 10), ch, font=font, fill=255)
+    return img.tobytes()
+
+
 def _arabic_font_healthy():
-    """يتحقق فعلياً (لا يفترض فقط) أن الخط المضمّن يرسم حرفاً عربياً حقيقياً، لأن raqm أحياناً يفشل بصمت بدون استثناء."""
+    """يتحقق فعلياً أن الخط يرسم حرفاً عربياً حقيقياً، لا مجرد رمز 'مربع مفقود' (tofu) عام.
+
+    الفحص القديم كان يكتفي بالتأكد من وجود أي حبر بالصورة، وهذا خاطئ لأن رمز
+    'الحرف المفقود' نفسه يُرسم بحبر ظاهر (مربع بحدود) - فكان يمرّ الفحص رغم فشل العرض فعلياً.
+    الفحص الصحيح: نقارن رسم حرف عربي حقيقي برسم رمز من نطاق غير مستخدم إطلاقاً (Private Use Area)،
+    وهذا الأخير يُرسم دائماً كرمز 'مفقود' من أي خط عادي. لو تطابقا، فالخط لا يدعم العربية فعلياً هنا.
+    """
     global _ARABIC_FONT_HEALTHY
     if _ARABIC_FONT_HEALTHY is not None:
         return _ARABIC_FONT_HEALTHY
     try:
-        test_font = _load_headline_font(60, layout_engine=ImageFont.Layout.BASIC)
-        test_img = Image.new("L", (120, 80), 0)
-        test_draw = ImageDraw.Draw(test_img)
-        test_draw.text((10, 10), _shape_arabic_fallback("الف"), font=test_font, fill=255)
-        _ARABIC_FONT_HEALTHY = test_img.getbbox() is not None
+        test_font = _load_headline_font(80, layout_engine=ImageFont.Layout.BASIC)
+        arabic_bytes = _render_char_bytes(test_font, "ا")
+        notdef_bytes = _render_char_bytes(test_font, chr(0xE000))  # Private Use Area: لا يوجد بأي خط عادي
+        _ARABIC_FONT_HEALTHY = arabic_bytes != notdef_bytes
         if not _ARABIC_FONT_HEALTHY:
-            print("ERROR: embedded Arabic font produced no visible glyphs (unexpected - please report this).")
+            print("ERROR: embedded Arabic font's glyphs are visually identical to the missing-character "
+                  "placeholder in this environment - Arabic text will not render correctly here. "
+                  "Skipping on-image Arabic text as a safety net (caption text is unaffected).")
     except Exception as e:
         _ARABIC_FONT_HEALTHY = False
         print(f"ERROR: could not load embedded Arabic font: {str(e)[:200]}")
@@ -477,19 +491,23 @@ def apply_brand_template(image_path, headline, highlight):
         _draw_radar_icon(draw, (width // 2, icon_cy), icon_r, BRAND_ACCENT_COLOR + (255,))
 
         # العنوان الكبير أسفل الصورة، مع تمييز لوني لأهم جزء فيه
-        headline_text = _sanitize_headline(headline)
-        headline_font = _load_headline_font(max(40, width // 15))
-        max_text_width = int(width * 0.88)
-        lines = _wrap_arabic_text(draw, headline_text, headline_font, max_text_width)
+        # (إذا كان الخط العربي معطوباً بهذه البيئة، نتخطى رسمه بدل نشر مربعات مكسورة - الكابشن يحمل النص كاملاً أصلاً)
+        if _arabic_font_healthy():
+            headline_text = _sanitize_headline(headline)
+            headline_font = _load_headline_font(max(40, width // 15))
+            max_text_width = int(width * 0.88)
+            lines = _wrap_arabic_text(draw, headline_text, headline_font, max_text_width)
 
-        highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
+            highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
 
-        line_height = int(width // 15 * 1.3)
-        y_cursor = icon_cy + icon_r + 34
-        for line in lines:
-            _draw_arabic_line_mixed(draw, width // 2, y_cursor, line, headline_font,
-                                     (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words)
-            y_cursor += line_height
+            line_height = int(width // 15 * 1.3)
+            y_cursor = icon_cy + icon_r + 34
+            for line in lines:
+                _draw_arabic_line_mixed(draw, width // 2, y_cursor, line, headline_font,
+                                         (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words)
+                y_cursor += line_height
+        else:
+            print("WARNING: skipping on-image Arabic headline (font unhealthy in this environment); full headline is still in the caption text.")
 
         # مقبض العلامة التجارية أسفل اللوحة تماماً (خط لاتيني مخصص، لضمان عرض سليم لاسم العلامة الإنكليزي)
         handle_font = _load_latin_font(max(18, width // 38))
