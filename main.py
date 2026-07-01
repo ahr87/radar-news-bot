@@ -7,6 +7,7 @@ import ctypes
 import ctypes.util
 import random
 import base64
+import urllib.parse
 from io import BytesIO
 from threading import Thread
 
@@ -124,6 +125,31 @@ RSS_FEEDS = [
     {
         "name": "IGN",
         "url": "https://feeds.ign.com/ign/all",
+    },
+    # مصادر إضافية للتسريبات والأخبار الحصرية (محتوى مفاجئ عادة يحقق تفاعل أعلى)
+    {
+        "name": "MacRumors",
+        "url": "https://www.macrumors.com/macrumors.xml",
+    },
+    {
+        "name": "9to5Google",
+        "url": "https://9to5google.com/feed/",
+    },
+    {
+        "name": "9to5Mac",
+        "url": "https://9to5mac.com/feed/",
+    },
+    {
+        "name": "Tom's Hardware",
+        "url": "https://www.tomshardware.com/feeds/all",
+    },
+    {
+        "name": "XDA Developers",
+        "url": "https://www.xda-developers.com/feed/",
+    },
+    {
+        "name": "Hacker News",
+        "url": "https://hnrss.org/frontpage",
     },
 ]
 
@@ -317,7 +343,7 @@ def generate_arabic_content(story):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": text_prompt}],
             temperature=0.9,
         )
@@ -357,7 +383,7 @@ def build_image_prompt(story, topic_summary):
     summary = clean_html(story["summary"])
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
@@ -513,6 +539,23 @@ def apply_brand_template(image_path, headline, highlight):
         print(f"WARNING: could not apply brand template to image (continuing without it): {str(e)[:200]}")
 
 
+def _generate_image_pollinations(prompt):
+    """توليد صورة مجاني بالكامل (بدون مفتاح API) عبر Pollinations.ai، كخيار أول لتقليل تكلفة OpenAI."""
+    print("Generating cover image (pollinations.ai, free)...")
+    try:
+        encoded_prompt = urllib.parse.quote(prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        params = {"width": 1024, "height": 1536, "nologo": "true"}
+        resp = requests.get(url, params=params, timeout=90)
+        resp.raise_for_status()
+        if not resp.content or len(resp.content) < 1000:
+            raise ValueError("empty or too-small response")
+        return resp.content
+    except Exception as e:
+        print(f"WARNING: pollinations.ai failed ({str(e)[:150]}), falling back to OpenAI image models...")
+        return None
+
+
 def generate_cover_image(story, topic_summary, headline, highlight):
     print("Building a safe, story-relevant image prompt...")
     try:
@@ -520,6 +563,13 @@ def generate_cover_image(story, topic_summary, headline, highlight):
     except Exception as e:
         print(f"ERROR building image prompt: {e}")
         return False
+
+    img_data = _generate_image_pollinations(image_prompt)
+    if img_data:
+        with open(TEMP_IMAGE, "wb") as handler:
+            handler.write(img_data)
+        apply_brand_template(TEMP_IMAGE, headline, highlight)
+        return True
 
     print("Generating cover image (dall-e-3)...")
     try:
@@ -654,11 +704,22 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
 
-    # جدولة النشر (التوقيت بـ UTC - سيرفر ريبليت)
-    # 11:00 UTC = 2:00 PM توقيت محلي
-    # 17:00 UTC = 8:00 PM توقيت محلي
-    schedule.every().day.at("11:00").do(job)
-    schedule.every().day.at("17:00").do(job)
+    # جدولة النشر: 10 منشورات يومياً موزّعة على أوقات الذروة بالتوقيت المحلي العراقي (UTC+3)
+    # كثافة أعلى بالفترة المسائية والليلية (الأعلى تفاعلاً عادة لجمهورنا)، مع حضور صباحي وظهري خفيف.
+    PEAK_TIMES_UTC = [
+        "06:00",  # 09:00 صباحاً محلي
+        "08:00",  # 11:00 صباحاً محلي
+        "10:00",  # 01:00 ظهراً محلي
+        "12:00",  # 03:00 عصراً محلي
+        "13:30",  # 04:30 عصراً محلي
+        "15:00",  # 06:00 مساءً محلي
+        "16:30",  # 07:30 مساءً محلي
+        "18:00",  # 09:00 مساءً محلي (ذروة)
+        "19:30",  # 10:30 مساءً محلي (ذروة)
+        "21:00",  # 12:00 منتصف الليل محلي (ذروة سهر)
+    ]
+    for t in PEAK_TIMES_UTC:
+        schedule.every().day.at(t).do(job)
 
     print("Automation running in the background... publishing at the scheduled times.")
     print("Keep-alive server is running; you can now link it with UptimeRobot.")
