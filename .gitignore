@@ -47,3 +47,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Radar News Bot: runtime state, not source code
+seen_stories.json
+temp_image.jpg
+temp_audio.mp3
+output_reel.mp4

@@ -12,6 +12,7 @@ import requests
 import schedule
 from flask import Flask
 from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 # --- المفاتيح من بيئة ريبليت ---
 ACCESS_TOKEN = os.environ.get('IG_ACCESS_TOKEN')
@@ -25,6 +26,12 @@ SEEN_FILE = "seen_stories.json"
 TEMP_IMAGE = "temp_image.jpg"
 TEMP_AUDIO = "temp_audio.mp3"
 TEMP_VIDEO = "output_reel.mp4"
+
+# قالب العلامة التجارية الثابت (يُطبَّق برمجياً على كل صورة، بدل الاعتماد فقط على طلب GPT)
+BRAND_NAME = "RADAR NEWS"
+BRAND_ACCENT_COLOR = (255, 196, 60)
+BRAND_FRAME_WIDTH = 14
+BRAND_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts", "LiberationSans-Bold.ttf")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
@@ -260,6 +267,11 @@ def build_image_prompt(story, topic_summary):
                     f"- Vertical composition (9:16)\n"
                     f"- ABSOLUTELY NO text, letters, numbers, symbols, signage, or writing anywhere in the image, "
                     f"in any language — this is critical, image models often render garbled text so avoid it entirely\n"
+                    f"- Do NOT represent abstract ideas (math, science, data, language, time) using floating digits, "
+                    f"equations, glyphs, or symbol clusters, even as decorative or stylized elements — express the "
+                    f"concept only through concrete objects, creatures, scenery, colors, and lighting\n"
+                    f"- Prefer a well-lit, glowing, or sunlit setting; avoid deep darkness, black voids, or dim night "
+                    f"scenes unless absolutely essential to the concept\n"
                     f"- Masterpiece quality, highly detailed, cinematic lighting\n"
                     f"- No real people, no logos, no copyrighted elements\n"
                     f"- Apply this {BRAND_VISUAL_STYLE}\n"
@@ -282,6 +294,54 @@ def _save_generated_image(image_response):
         img_data = base64.b64decode(data.b64_json)
     with open(TEMP_IMAGE, "wb") as handler:
         handler.write(img_data)
+    apply_brand_template(TEMP_IMAGE)
+
+
+def apply_brand_template(image_path):
+    """يطبّق هوية بصرية ثابتة (تفتيح + إطار + شعار) على كل صورة، بغض النظر عن ناتج الذكاء الاصطناعي."""
+    try:
+        img = Image.open(image_path).convert("RGB")
+
+        # تصحيح تلقائي للسطوع والتباين والتشبع، لتفادي الصور الداكنة/الباهتة بشكل مضمون
+        img = ImageEnhance.Brightness(img).enhance(1.15)
+        img = ImageEnhance.Contrast(img).enhance(1.10)
+        img = ImageEnhance.Color(img).enhance(1.25)
+
+        img = img.convert("RGBA")
+        width, height = img.size
+
+        # تدرّج داكن أسفل الصورة لوضوح الشعار
+        gradient_height = int(height * 0.20)
+        gradient = Image.new("RGBA", (width, gradient_height), (0, 0, 0, 0))
+        gradient_draw = ImageDraw.Draw(gradient)
+        for y in range(gradient_height):
+            alpha = int(180 * (y / gradient_height))
+            gradient_draw.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
+        img.alpha_composite(gradient, (0, height - gradient_height))
+
+        draw = ImageDraw.Draw(img)
+
+        # إطار ثابت بلون العلامة التجارية يميّز شكل منشورات الصفحة
+        draw.rectangle(
+            [0, 0, width - 1, height - 1],
+            outline=BRAND_ACCENT_COLOR + (255,),
+            width=BRAND_FRAME_WIDTH,
+        )
+
+        # شعار نصي إنكليزي ثابت (باللاتيني عمداً لتفادي تشوّه الحروف العربية بالصور)
+        font_size = max(30, width // 16)
+        font = ImageFont.truetype(BRAND_FONT_PATH, font_size)
+        margin = BRAND_FRAME_WIDTH + 26
+        draw.text(
+            (margin, height - margin - font_size),
+            BRAND_NAME,
+            font=font,
+            fill=(255, 255, 255, 255),
+        )
+
+        img.convert("RGB").save(image_path, "JPEG", quality=95)
+    except Exception as e:
+        print(f"⚠️ تعذر تطبيق قالب العلامة على الصورة (سيتم المتابعة بدونه): {str(e)[:200]}")
 
 
 def generate_cover_image(story, topic_summary):
