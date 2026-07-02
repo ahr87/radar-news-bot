@@ -73,6 +73,7 @@ OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 
 SEEN_FILE = "seen_stories.json"
 TEMP_IMAGE = "temp_image.jpg"
+TEMP_IMAGE_2 = "temp_image_2.jpg"
 
 IMAGE_WIDTH = 1080
 IMAGE_HEIGHT = 1350  # نسبة 4:5 (الأنسب لمنشورات فيد انستغرام، بدل الريلز)
@@ -202,13 +203,26 @@ def _word_advance(draw, word, font):
     return draw.textlength(word, font=font, direction="rtl", language="ar")
 
 
-def _wrap_arabic_words(draw, text, font, max_width):
-    """يقسّم النص إلى أسطر، كل سطر قائمة كلمات (بترتيبها المنطقي)، بحيث لا يتجاوز عرض السطر max_width."""
+# أسماء الشركات/المنتجات الأجنبية (OpenAI, iPhone...) قد تظهر داخل العنوان بحكم قاعدة المحتوى
+# الجديدة. خط "Noto Kufi Arabic" لا يحتوي غالباً على كل حروف اللاتينية بشكل موثوق، فيظهر
+# مربعات فارغة (tofu) تماماً كمشكلة التشكيل العربي القديمة. الحل: كشف الكلمات اللاتينية
+# واختيار خط لاتيني (Liberation Sans) لها تحديداً، كلمة بكلمة، بدل خط واحد لكل السطر.
+def _is_latin_word(word):
+    return not any('؀' <= ch <= 'ۿ' or 'ݐ' <= ch <= 'ݿ' for ch in word)
+
+
+def _font_for_word(word, size):
+    return _load_latin_font(size) if _is_latin_word(word) else _load_headline_font(size)
+
+
+def _wrap_arabic_words(draw, text, size, max_width):
+    """يقسّم النص إلى أسطر، كل سطر قائمة كلمات (بترتيبها المنطقي)، بحيث لا يتجاوز عرض السطر max_width.
+    كل كلمة تُقاس بالخط المناسب لها (عربي أو لاتيني) حسب محتواها."""
     words = text.split()
-    space_w = _word_advance(draw, " ", font)
+    space_w = _word_advance(draw, " ", _load_headline_font(size))
     lines, current, current_w = [], [], 0
     for word in words:
-        w = _word_advance(draw, word, font)
+        w = _word_advance(draw, word, _font_for_word(word, size))
         add_w = w + (space_w if current else 0)
         if current and current_w + add_w > max_width:
             lines.append(current)
@@ -221,14 +235,16 @@ def _wrap_arabic_words(draw, text, font, max_width):
     return lines
 
 
-def _draw_rtl_line(draw, center_x, y, words, font, normal_color, highlight_color, highlight_words,
+def _draw_rtl_line(draw, center_x, y, words, size, normal_color, highlight_color, highlight_words,
                     stroke_width=0, stroke_fill=None):
-    """يرسم قائمة كلمات عربية بترتيب يميني صحيح حول مركز أفقي، مع تلوين كلمات التمييز بلون مختلف."""
-    space_w = _word_advance(draw, " ", font)
-    advances = [_word_advance(draw, w, font) for w in words]
+    """يرسم قائمة كلمات عربية بترتيب يميني صحيح حول مركز أفقي، مع تلوين كلمات التمييز بلون مختلف.
+    كل كلمة تُرسم بالخط المناسب لها (عربي أو لاتيني) حسب محتواها، لتفادي مربعات فارغة بأسماء أجنبية."""
+    space_w = _word_advance(draw, " ", _load_headline_font(size))
+    fonts = [_font_for_word(w, size) for w in words]
+    advances = [_word_advance(draw, w, f) for w, f in zip(words, fonts)]
     total_w = sum(advances) + space_w * max(0, len(words) - 1)
     x_cursor = center_x + total_w / 2
-    for word, adv in zip(words, advances):
+    for word, adv, font in zip(words, advances, fonts):
         x_cursor -= adv
         color = highlight_color if word.strip(".,،؟!") in highlight_words else normal_color
         draw.text((x_cursor, y), word, font=font, fill=color, anchor="la",
@@ -328,17 +344,18 @@ def generate_arabic_content(story):
     2. لا تُعِد صياغة العنوان الرئيسي المعروف للخبر حرفياً. ابحث داخل الملخص عن أهم وأغرب تفصيل تقني فيه (رقم صادم، قدرة جديدة غير متوقعة، تأثير مستقبلي)، واجعله محور المحتوى.
     3. العنوان المصوّر: 5 إلى 9 كلمات، يُكتب بخط كبير أسفل الصورة على 2-3 أسطر. لا تستخدم علامة التعجب "!" إطلاقاً.
     4. التمييز: انسخ حرفياً (كلمة لكلمة، بدون أي تغيير) عبارة قصيرة من 2 إلى 4 كلمات من داخل "العنوان" نفسه بالضبط - أهم جزء فيه (الرقم الصادم أو النتيجة المفاجئة) - لتلوينها بلون مميز.
-    5. اختم بسؤال حقيقي يحفّز الناس يكتبون تعليق (مو مجرد "شنو رأيك" عام، خليه سؤال مرتبط تحديداً بتفصيل الخبر).
-    6. اكتب بالعربية الفصحى المبسطة والسليمة 100%، بدون كلمات إنجليزية.
+    5. اذكر بوضوح اسم الشركة أو المنصة أو المنتج المحدد المذكور بالخبر ضمن "الجسم" — ممنوع تترك القارئ لا يعرف عن أي جهة/خدمة يتحدث الخبر. لا تكتب وصفاً عاماً غامضاً ("عرض خاص"، "منصة جديدة"...) بدون تسمية الجهة صراحة، حتى لو تطلّب هذا ذكر اسمها الأجنبي كما هو.
+    6. اختم بسؤال حقيقي يحفّز الناس يكتبون تعليق (مو مجرد "شنو رأيك" عام، خليه سؤال مرتبط تحديداً بتفصيل الخبر).
+    7. اكتب بالعربية الفصحى المبسطة والسليمة 100%، ما عدا أسماء الشركات/المنتجات الأجنبية نفسها (تُكتب كما هي بدون ترجمة).
 
     استخدم هذا التنسيق بالضبط في ردك (بدون أي نص إضافي خارج هذا التنسيق):
     الملخص: (كلمتين إلى أربع كلمات، وصف بصري ملموس لأهم عنصر تقني بالخبر، لتوليد صورة عنه)
     العنوان: (5 إلى 9 كلمات، بدون علامة تعجب)
     التمييز: (نسخة حرفية طبق الأصل لـ 2-4 كلمات موجودة داخل العنوان أعلاه بالضبط)
     الخطاف: (أول جملة بالمنشور، سؤال أو جملة صادمة قصيرة)
-    الجسم: (3 إلى 4 جمل تكشف التفصيل التقني تدريجياً بأسلوب قصصي شيق)
+    الجسم: (3 إلى 4 جمل تكشف التفصيل التقني تدريجياً بأسلوب قصصي شيق، تذكر اسم الشركة/المنصة صراحة)
     السؤال الختامي: (سؤال قصير مرتبط تحديداً بالخبر يحفّز التعليقات)
-    الهاشتاقات: (8 إلى 10 هاشتاقات عربية وإنجليزية مرتبطة تحديداً بموضوع الخبر، بدون هاشتاقات عامة مكررة)
+    الهاشتاقات: (5 هاشتاقات فقط، عربية وإنجليزية، مرتبطة تحديداً وحصراً بموضوع هذا الخبر بالذات - ممنوع أي هاشتاق عام يصلح لأي خبر آخر)
     """
 
     try:
@@ -371,10 +388,10 @@ def generate_arabic_content(story):
         )
 
         print(f"Content written: {headline}")
-        return topic_summary, headline, highlight, caption
+        return topic_summary, headline, highlight, caption, hook, closing_question
     except Exception as e:
         print(f"ERROR generating content: {e}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
 
 # --- توليد صورة غلاف عمودية آمنة السياسة، مرتبطة مباشرة بموضوع الخبر ---
@@ -486,9 +503,9 @@ def apply_brand_template(image_path, headline, highlight):
 
         # نحسب أسطر العنوان أولاً (كل سطر قائمة كلمات)، لأن ارتفاع اللوحة يعتمد عليها (يمنع أي تداخل)
         headline_text = _sanitize_headline(headline)
-        headline_font = _load_headline_font(max(40, width // 15))
+        headline_size = max(40, width // 15)
         max_text_width = int(width * 0.88)
-        lines = _wrap_arabic_words(measure_draw, headline_text, headline_font, max_text_width) if headline_text else []
+        lines = _wrap_arabic_words(measure_draw, headline_text, headline_size, max_text_width) if headline_text else []
 
         icon_r = int(width * 0.032)
         line_height = int(width // 15 * 1.3)
@@ -522,7 +539,7 @@ def apply_brand_template(image_path, headline, highlight):
         highlight_words = set(_sanitize_headline(highlight).split()) if highlight else set()
         stroke_w = max(2, width // 260)
         for line_words in lines:
-            _draw_rtl_line(draw, width // 2, y_cursor, line_words, headline_font,
+            _draw_rtl_line(draw, width // 2, y_cursor, line_words, headline_size,
                             (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), highlight_words,
                             stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
             y_cursor += line_height
@@ -537,6 +554,60 @@ def apply_brand_template(image_path, headline, highlight):
         img.convert("RGB").save(image_path, "JPEG", quality=95)
     except Exception as e:
         print(f"WARNING: could not apply brand template to image (continuing without it): {str(e)[:200]}")
+
+
+def build_detail_slide(hook, closing_question):
+    """يبني شريحة كاروسيل ثانية (بطاقة نصية بهوية الحساب): أهم جملة من الخبر + سؤال يحفّز التعليقات.
+    ترفع وقت المكوث بالمنشور (Dwell Time) وتشجّع التعليقات — من أهم عوامل الوصول لصفحة الاكتشاف.
+    لا تحتاج أي توليد صورة بالذكاء الاصطناعي (رسم مباشر)، فلا تضيف أي تكلفة إضافية."""
+    try:
+        img = Image.new("RGBA", (IMAGE_WIDTH, IMAGE_HEIGHT), (8, 10, 20, 255))
+        draw = ImageDraw.Draw(img)
+
+        for y in range(IMAGE_HEIGHT):
+            t = y / IMAGE_HEIGHT
+            fill = (int(8 + 12 * t), int(10 + 4 * t), int(20 + 20 * t), 255)
+            draw.line([(0, y), (IMAGE_WIDTH, y)], fill=fill)
+
+        icon_r = int(IMAGE_WIDTH * 0.045)
+        icon_cy = int(IMAGE_HEIGHT * 0.14)
+        _draw_radar_icon(draw, (IMAGE_WIDTH // 2, icon_cy), icon_r, BRAND_ACCENT_COLOR + (255,))
+
+        max_w = int(IMAGE_WIDTH * 0.86)
+        stroke_w = max(2, IMAGE_WIDTH // 260)
+
+        hook_text = _sanitize_headline(hook)
+        hook_size = max(48, IMAGE_WIDTH // 12)
+        hook_lines = _wrap_arabic_words(draw, hook_text, hook_size, max_w) if hook_text else []
+        line_height = int(IMAGE_WIDTH // 12 * 1.35)
+        y_cursor = (IMAGE_HEIGHT - line_height * len(hook_lines)) // 2
+        for line_words in hook_lines:
+            _draw_rtl_line(draw, IMAGE_WIDTH // 2, y_cursor, line_words, hook_size,
+                            (255, 255, 255, 255), BRAND_ACCENT_COLOR + (255,), set(),
+                            stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
+            y_cursor += line_height
+
+        question_text = _sanitize_headline(closing_question)
+        question_size = max(32, IMAGE_WIDTH // 22)
+        q_lines = _wrap_arabic_words(draw, question_text, question_size, max_w) if question_text else []
+        q_line_height = int(IMAGE_WIDTH // 22 * 1.3)
+        q_y = IMAGE_HEIGHT - int(IMAGE_HEIGHT * 0.15) - q_line_height * len(q_lines)
+        for line_words in q_lines:
+            _draw_rtl_line(draw, IMAGE_WIDTH // 2, q_y, line_words, question_size,
+                            BRAND_ACCENT_COLOR + (255,), BRAND_ACCENT_COLOR + (255,), set(),
+                            stroke_width=max(1, IMAGE_WIDTH // 400), stroke_fill=(0, 0, 0, 255))
+            q_y += q_line_height
+
+        handle_font_size = max(18, IMAGE_WIDTH // 38)
+        handle_font = _load_latin_font(handle_font_size)
+        draw.text((IMAGE_WIDTH // 2, IMAGE_HEIGHT - 48), f">> {BRAND_HANDLE}", font=handle_font,
+                   fill=BRAND_ACCENT_COLOR + (255,), anchor="mm")
+
+        img.convert("RGB").save(TEMP_IMAGE_2, "JPEG", quality=95)
+        return True
+    except Exception as e:
+        print(f"WARNING: could not build detail slide (continuing with single-image post): {str(e)[:200]}")
+        return False
 
 
 def _generate_image_pollinations(prompt):
@@ -619,42 +690,80 @@ def upload_to_temp_server(file_path):
         return None
 
 
-def post_image_to_instagram(image_url, caption):
-    print("Sending photo to Meta for processing...")
+def _create_media_container(params):
     url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media"
-
-    params = {'image_url': image_url, 'caption': caption, 'access_token': ACCESS_TOKEN}
     res = requests.post(url, data=params).json()
-
     if 'id' not in res:
         print(f"ERROR creating media container: {res}")
-        return False
+        return None
+    return res['id']
 
-    creation_id = res['id']
+
+def _wait_until_ready(creation_id):
     status_url = f"https://graph.facebook.com/v25.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
-
-    is_ready = False
     for _ in range(8):
         time.sleep(3)
         status_res = requests.get(status_url).json()
         if status_res.get('status_code') in ('FINISHED', None):
-            is_ready = True
-            break
-
-    if is_ready:
-        print("Publishing to Explore...")
-        publish_url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
-        publish_res = requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-
-        if 'id' in publish_res:
-            print("SUCCESS: published!")
             return True
     return False
 
 
+def _publish_container(creation_id):
+    publish_url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
+    publish_res = requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
+    return 'id' in publish_res
+
+
+def _post_single_image(image_url, caption, alt_text):
+    creation_id = _create_media_container({
+        'image_url': image_url, 'caption': caption, 'alt_text': alt_text, 'access_token': ACCESS_TOKEN
+    })
+    if not creation_id or not _wait_until_ready(creation_id):
+        return False
+    print("Publishing to Explore...")
+    if _publish_container(creation_id):
+        print("SUCCESS: published!")
+        return True
+    return False
+
+
+def _post_carousel(image_urls, caption, alt_text):
+    child_ids = []
+    for url in image_urls:
+        child_id = _create_media_container({
+            'image_url': url, 'is_carousel_item': 'true', 'alt_text': alt_text, 'access_token': ACCESS_TOKEN
+        })
+        if not child_id:
+            print("WARNING: failed to create a carousel slide, falling back to single-image post...")
+            return _post_single_image(image_urls[0], caption, alt_text)
+        child_ids.append(child_id)
+
+    creation_id = _create_media_container({
+        'media_type': 'CAROUSEL', 'children': ",".join(child_ids),
+        'caption': caption, 'access_token': ACCESS_TOKEN
+    })
+    if not creation_id or not _wait_until_ready(creation_id):
+        return False
+    print("Publishing to Explore...")
+    if _publish_container(creation_id):
+        print("SUCCESS: published!")
+        return True
+    return False
+
+
+def post_to_instagram(image_urls, caption, alt_text):
+    """ينشر صورة واحدة أو كاروسيل (لرفع وقت المكوث بالمنشور) حسب عدد الصور المتوفرة."""
+    print("Sending photo(s) to Meta for processing...")
+    if len(image_urls) >= 2:
+        return _post_carousel(image_urls, caption, alt_text)
+    return _post_single_image(image_urls[0], caption, alt_text)
+
+
 def cleanup_temp_files():
-    if os.path.exists(TEMP_IMAGE):
-        os.remove(TEMP_IMAGE)
+    for path in (TEMP_IMAGE, TEMP_IMAGE_2):
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def job():
@@ -676,7 +785,7 @@ def job():
 
     print(f"Selected story: {story['title']} ({story['source']})")
 
-    topic_summary, headline, highlight, caption = generate_arabic_content(story)
+    topic_summary, headline, highlight, caption, hook, closing_question = generate_arabic_content(story)
     if not (topic_summary and headline and caption):
         print("ERROR: failed to generate Arabic content. Cancelling cycle.")
         return
@@ -691,7 +800,16 @@ def job():
         cleanup_temp_files()
         return
 
-    if post_image_to_instagram(public_image_url, caption):
+    # الشريحة الثانية (كاروسيل) تزيد وقت المكوث بالمنشور — إذا فشلت لأي سبب ننشر بصورة واحدة بدون توقف
+    slide_urls = [public_image_url]
+    if build_detail_slide(hook, closing_question):
+        detail_url = upload_to_temp_server(TEMP_IMAGE_2)
+        if detail_url:
+            slide_urls.append(detail_url)
+
+    alt_text = _sanitize_headline(headline)[:100]
+
+    if post_to_instagram(slide_urls, caption, alt_text):
         save_seen_story(story["id"])
 
     cleanup_temp_files()
