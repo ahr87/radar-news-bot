@@ -720,18 +720,23 @@ def _create_media_container(params):
 
 def _wait_until_ready(creation_id):
     status_url = f"https://graph.facebook.com/v25.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
+    status_res = {}
     for _ in range(8):
         time.sleep(3)
         status_res = requests.get(status_url).json()
         if status_res.get('status_code') in ('FINISHED', None):
             return True
+    print(f"ERROR: media container {creation_id} never became ready: {status_res}")
     return False
 
 
 def _publish_container(creation_id):
     publish_url = f"https://graph.facebook.com/v25.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
     publish_res = requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN}).json()
-    return 'id' in publish_res
+    if 'id' not in publish_res:
+        print(f"ERROR publishing container {creation_id}: {publish_res}")
+        return False
+    return True
 
 
 def _post_single_image(image_url, caption, alt_text):
@@ -827,6 +832,9 @@ def job():
             slide_urls.append(detail_url)
 
     alt_text = _sanitize_headline(headline)[:100]
+
+    print(f"Posting as {'carousel' if len(slide_urls) >= 2 else 'single image'} ({len(slide_urls)} slide(s)).")
+    print(f"Full caption:\n{caption}")
 
     if post_to_instagram(slide_urls, caption, alt_text):
         save_seen_story(story["id"])
