@@ -473,10 +473,17 @@ _ALLOWED_CHAR_RANGES = (
 )
 
 
+# حروف مسموحة يونيكودياً (ضمن _ALLOWED_CHAR_RANGES) لكن خط NotoKufiArabic-Bold تحديداً
+# لا يملك لها Glyph سليم (تظهر tofu حتى بمعزل عن أي مشكلة تشكيل) — تأكدنا من هذا سابقاً
+# بالاختبار المباشر، فنحذفها صراحة بغض النظر عن التزام الذكاء الاصطناعي بتعليمات البرومت.
+_BROKEN_GLYPH_CHARS = "!！"
+
+
 def _sanitize_headline(text):
     cleaned = "".join(
         ch for ch in text
-        if ch.isspace() or any(lo <= ord(ch) <= hi for lo, hi in _ALLOWED_CHAR_RANGES)
+        if ch not in _BROKEN_GLYPH_CHARS
+        and (ch.isspace() or any(lo <= ord(ch) <= hi for lo, hi in _ALLOWED_CHAR_RANGES))
     )
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -813,6 +820,11 @@ def job():
     if not (topic_summary and headline and caption):
         print("ERROR: failed to generate Arabic content. Cancelling cycle.")
         return
+
+    print(f"Raw headline (slide 1): {headline!r}")
+    print(f"Raw highlight: {highlight!r}")
+    print(f"Raw hook (slide 2): {hook!r}")
+    print(f"Raw closing question (slide 2): {closing_question!r}")
 
     if not generate_cover_image(story, topic_summary, headline, highlight):
         print("ERROR: failed to generate image. Cancelling cycle.")
