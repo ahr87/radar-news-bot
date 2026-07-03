@@ -51,6 +51,7 @@ Thumbs.db
 # Radar News Bot: runtime state, not source code
 seen_stories.json
 temp_image.jpg
+temp_image_2.jpg
 temp_audio.mp3
 base_reel.mp4
 output_reel.mp4
