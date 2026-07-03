@@ -458,8 +458,27 @@ def _save_generated_image(image_response, headline, highlight):
     apply_brand_template(TEMP_IMAGE, headline, highlight)
 
 
+# نطاقات الحروف المسموحة برسمها على الصورة: عربي (بأشكاله وتشكيله) + لاتيني/أرقام/علامات ترقيم أساسية.
+# أي رمز خارج هذا النطاق (إيموجي، رموز زخرفية، رموز كيكاب للأرقام...) لا تحتويه خطوطنا المضمّنة
+# (Noto Kufi Arabic و Liberation Sans) فيظهر كمربع فارغ (tofu) — بدل محاولة استثناء كل رمز
+# محتمل يدوياً (بلا نهاية وقابل للفشل مستقبلاً)، نستخدم قائمة سماح (whitelist) تضمن عدم تكرار
+# هذا الخلل بغض النظر عن أي رمز غير متوقع يولّده الذكاء الاصطناعي مستقبلاً.
+_ALLOWED_CHAR_RANGES = (
+    (0x0020, 0x007E),  # ASCII: حروف لاتينية، أرقام، علامات ترقيم أساسية، مسافة
+    (0x0600, 0x06FF),  # عربي أساسي (بما فيه التشكيل)
+    (0x0750, 0x077F),  # ملحق عربي
+    (0x08A0, 0x08FF),  # عربي ممتد-أ
+    (0xFB50, 0xFDFF),  # أشكال عرض عربية-أ
+    (0xFE70, 0xFEFF),  # أشكال عرض عربية-ب
+)
+
+
 def _sanitize_headline(text):
-    return text.replace("!", "").replace("！", "").strip()
+    cleaned = "".join(
+        ch for ch in text
+        if ch.isspace() or any(lo <= ord(ch) <= hi for lo, hi in _ALLOWED_CHAR_RANGES)
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _crop_to_ratio(img, target_ratio):
